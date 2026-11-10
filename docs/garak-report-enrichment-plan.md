@@ -46,7 +46,7 @@ All of this exists today in every run. Nothing needs to be scraped from HTML.
 | `*.report.jsonl`, `eval` rows | Per probe/detector: `passed`, `total_evaluated`, `nones`, bootstrap `confidence_lower` / `confidence_upper` (when n >= 30), `hit_at_k`, optional per-intent counts | Statistics and confidence |
 | `*.report.jsonl`, `digest` row | Grouped results, `absolute_score` (a pass rate), relative Z-score, DEFCON grade 1 (worst) to 5 (best), probe tier, `technique_intent_matrix` | Severity, grouping, technique view |
 | `*.hitlog.jsonl` | One row per successful attack: `goal`, `prompt`, `output`, `triggers`, `score`, `probe`, `detector`, `generator`, attempt ids | Evidence shown to owners |
-| Probe tags | `owasp:*`, `avid-effect:*`, `risk-cards:*`, `cwe:*`, `demon:*` (technique), `euai:*` (new in 0.17.1). Catalogue in `garak/data/tags.misp.tsv` | Join key to the remediation knowledge base |
+| Probe tags | `owasp:*`, `avid-effect:*`, `risk-cards:*`, `cwe:*`, `demon:*` (technique), `euai:*` (new in 0.17.1), plus garak's own `payload:*` and `quality:*` tags. Catalogue in `garak/data/tags.misp.tsv` | Join key to the remediation knowledge base |
 | Probe tiers | 1 = of concern, 2 = compare with state of the art, 3 = informational, 9 = unlisted | Prioritisation |
 | `garak.analyze` tools | `report_digest`, `qual_review`, `tbsa`, `report_avid`, `rebuild_cis` | Reuse instead of rebuilding |
 
@@ -139,6 +139,7 @@ This is the core asset and the part that makes recommendations auditable.
 | 2.5 | Add a crosswalk from garak's OWASP tags to the OWASP edition and internal control ids governance uses. |
 | 2.6 | Review with the guardrail owners and one application team. Their capability catalogue decides which guardrail recommendations are realistic. |
 | 2.7 | Version the KB in git. Record the KB version in every report. |
+| 2.8 | Coverage test: enumerate every probe in the pinned garak install and fail the build if any probe has no mapping through the fallback chain in section 9. |
 
 Sources for entries: OWASP LLM Top 10 mitigations, CWE mitigations for `cwe:*` tags, the guardrail product's own policy catalogue, internal standards.
 
@@ -178,7 +179,7 @@ Keep the rubric simple and published in the report.
 | Input | Source |
 |---|---|
 | Exploitability | hit@k at full generation count; lower interval bound of attack success rate |
-| Probe importance | garak tier (1 > 2 > 3; tier 9 excluded) |
+| Probe importance | garak tier (1 > 2 > 3; tier 9 is reported unranked, not dropped) |
 | garak grade | DEFCON, minimum of absolute and relative |
 | Impact | Severity set per risk category in the KB |
 | Exposure (optional) | App metadata: user population, data classification, tool access |
@@ -340,7 +341,62 @@ Starting point for Phase 2. Wording and feasibility need review with the owners.
 | `owasp:llm04` (resource abuse) | Platform | Token and rate limits; output length caps; timeouts |
 | `owasp:llm08` (excessive agency) | Application | Narrow tool scopes; confirmation for state-changing actions |
 
-## 9. Risks
+## 9. Coverage across all garak probes
+
+### 9.1 What works for any probe
+
+The parser, statistics, scoring, overrides, rendering and delta stages read `attempt`, `eval` and `digest` rows. Those rows have the same shape whichever probe produced them, so these stages need no per-probe work, including for probes added in later garak versions or written in-house.
+
+### 9.2 What needs per-probe handling
+
+| Gap | Why | Handling |
+|---|---|---|
+| Remediation mapping | Section 8 seeds the common cases only. A recommendation is only as specific as the KB entry behind it. | Fallback chain, most specific first: probe class entry, then `payload:*` / `demon:*` tag, then `owasp:*` / `cwe:*` tag, then probe module default, then a generic "unmapped" entry that still shows evidence and flags the finding for KB authoring. Nothing is dropped silently. Task 2.8 enforces this. |
+| Multi-turn probes | Attribution in Phase 3 assumes one prompt and one response. Iterative and conversational probes carry several turns per attempt. | Classify per conversation using `conversations`; a guardrail block at any turn counts. Read hit@k from the `n` key that garak uses when prompts get differing generation counts. |
+| Failures no guardrail owns | Hallucinated packages, snowballed false answers, accepted false claims, training-data replay and token glitches are model or application behaviour. | Extra attribution class `model_behaviour`, routed to the application or model platform owner. |
+| Probes that do not apply to an application endpoint | Some probes inspect model files or tokenizers, or need image or audio input. | Mark as "not applicable" per target in the scan config. Report them separately from "passed". |
+| Probes that did not run | Module and `all` selection picks up active probes only. Some probes are inactive by default or need an attacker model or a target description file. | The report lists probes run, probes skipped and why. No findings for a family must never read as "tested and clean". |
+| Tier 9 probes | Outside the priority rubric. | Listed in an "informational, unranked" section with evidence. |
+| Buffs | A buff changes the technique (for example paraphrase or encoding) but the probe's tags do not reflect it. | Read `buff_spec` from the run config row and add buff-to-technique entries to the KB. |
+| Intent-based runs | Results are organised by intent as well as technique. | Use `technique_intent_matrix`; allow KB entries keyed on intent. |
+| In-house probes | No upstream tags. | Require tags on every custom probe, or supply a module default in the KB. |
+
+### 9.3 Default mapping by probe family
+
+Starting defaults for the module-level fallback. Based on garak's documentation; confirm the list against `python -m garak --list_probes` on the pinned install, because families are added and renamed between releases.
+
+| Family | What it tests | Default owner | Default control group |
+|---|---|---|---|
+| `dan` | Persona and "do anything now" jailbreaks | Guardrail team | Jailbreak detection on input; refusal persistence in system prompt |
+| `promptinject` | Direct instruction hijacking | Guardrail team | Injection classifier; delimiting of untrusted input |
+| `encoding` | Payloads hidden in encodings | Guardrail team | Decode and normalise before inspection |
+| `badchars` | Invisible, homoglyph and reordered characters | Guardrail team | Unicode normalisation before inspection |
+| `suffix` | Adversarial suffix strings | Guardrail team | Gibberish or perplexity screening on input |
+| `phrasing` | Harmful requests rephrased by tense | Guardrail team | Intent-based rather than keyword-based policies |
+| `grandma` | Emotional roleplay to extract restricted content | Guardrail team | Roleplay-aware input policy; output category filter |
+| `tap`, `atkgen` | Attacker-model driven iterative attacks | Guardrail team | Conversation-level evaluation; detection of repeated probing; rate limits |
+| `fitd` | Gradual multi-turn escalation | Guardrail team | Conversation-level evaluation; session risk scoring |
+| `latentinjection` | Instructions hidden in documents or context | Application team | Treat retrieved content as data; restrict tool calls triggered by it |
+| `web_injection` | Markdown image exfiltration, script and markup output | Application team | Context-aware output encoding; URL allowlist; no raw rendering |
+| `exploitation` | Template, SQL and code injection through output | Application team | Never execute or render model output; parameterised queries; sandboxing |
+| `ansiescape` | Terminal escape codes in output | Application team | Strip control characters before logs and terminals |
+| `agent_breaker` | Tool misuse in agents (inactive by default) | Application team | Narrow tool scopes; confirmation for state-changing actions |
+| `apikey` | Producing or completing credentials | Guardrail team | Secret detection on output |
+| `malwaregen` | Malicious code generation | Guardrail team | Output code policy; restrict use case scope |
+| `realtoxicityprompts`, `continuation`, `lmrc` | Toxic, slur and other content harms | Guardrail team | Enable and tune the matching output content categories |
+| `topic` | Engaging with out-of-scope topics | Application team | Scope definition in system prompt; topical guardrail |
+| `leakreplay`, `divergence` | Reproducing training data | Model platform | Output similarity filter; output length caps; provider assurance |
+| `packagehallucination` | Inventing software packages | Application team | Validate names against an approved registry |
+| `misleading`, `snowball` | Accepting false premises; compounding wrong answers | Application team | Grounding with citations; abstain instructions |
+| `goodside` | Mixed collection of known attacks | Per probe class | Map each class individually |
+
+Families to look for and map if present in the install (not confirmed for 0.17.1 here): `av_spam_scanning`, `donotanswer`, `doctor`, `dra`, `fileformats`, `glitch`, `sata`, `smuggling`, `visual_jailbreak`, `audio`.
+
+### 9.4 Limit of the approach
+
+The report can only recommend fixes for weaknesses garak probes. Risks outside garak's catalogue (business-logic abuse, access control in retrieval, application-specific policies) need custom probes or another tool, and the report should say so.
+
+## 10. Risks
 
 | Risk | Mitigation |
 |---|---|
@@ -354,7 +410,7 @@ Starting point for Phase 2. Wording and feasibility need review with the owners.
 | Owners outside the red team do not act | Actions exported to the tracker with owner and priority; delta report shows ageing |
 | Harmful content in circulated reports | Redaction pass (6.4), access control (8.5) |
 
-## 10. Sequencing and effort
+## 11. Sequencing and effort
 
 Rough estimate for one engineer, with reviewer time from governance and the guardrail owners.
 
@@ -369,7 +425,7 @@ Rough estimate for one engineer, with reviewer time from governance and the guar
 
 Minimum useful version: Phases 0, 1, 2, 4 and 6 with template wording only. That is about three to four weeks and already answers "what to fix and who owns it". Attribution and LLM synthesis then improve precision and readability.
 
-## 11. Open questions
+## 12. Open questions
 
 1. Can the guardrail owners share block fingerprints, the policy catalogue, or a verdict export keyed by correlation id?
 2. Which OWASP LLM Top 10 edition and which internal control framework does governance report against?
@@ -378,7 +434,7 @@ Minimum useful version: Phases 0, 1, 2, 4 and 6 with template wording only. That
 5. Is a guardrail-off or bare-model comparison run possible in any lower environment?
 6. Which model on the gateway is approved for processing adversarial test content?
 
-## 12. References
+## 13. References
 
 - garak reporting: https://reference.garak.ai/en/stable/reporting.html
 - garak tags and taxonomies: https://reference.garak.ai/en/stable/tags_taxonomies.html
