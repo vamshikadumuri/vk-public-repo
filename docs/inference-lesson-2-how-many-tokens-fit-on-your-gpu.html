@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Many Tokens Fit on Your GPU?</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+:root {
+  /* Layout: same system as Lesson 1. One reading column (max 680px); each step = numbered heading, prose, one framed figure, one key idea.
+     Colour carries meaning: violet = model weights, teal = KV cache (decode memory), grey = overhead, hatched = held back. Amber stays prefill. */
+  --paper: #F4F6F9;
+  --band: #E8ECF2;
+  --surface: #FFFFFF;
+  --ink: #172036;
+  --muted: #586178;
+  --rule: #DCE1EA;
+  --prefill: #C27C0E;
+  --decode: #0088A3;
+  --decode-tint: #DBEEF2;
+  --weights: #7B5BD6;
+  --weights-tint: #EAE4FA;
+  --over: #A3ABB9;
+  --off: #B9C0CC;
+  --tok-a: #E3E8F0;
+  --tok-b: #D3DBE7;
+  --bad: #B42318;
+  --bad-tint: #FCE9E7;
+  --good: #1F7A4A;
+  --good-tint: #E3F3EA;
+  --display: 'Bricolage Grotesque', 'Avenir Next', system-ui, sans-serif;
+  --body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+    --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+    --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+    --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+  --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+  --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+  --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition: none !important; animation: none !important; } }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--body); font-size: 17px; line-height: 1.6; -webkit-text-size-adjust: 100%; }
+a { color: var(--decode); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--decode); outline-offset: 2px; border-radius: 4px; }
+.progress { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 10; }
+.progress span { display: block; height: 100%; width: 0; background: var(--decode); }
+.wrap { max-width: 680px; margin: 0 auto; padding: 0 20px; }
+
+/* Hero */
+.hero { background: var(--band); padding: 40px 0 32px; border-bottom: 1px solid var(--rule); }
+.kicker { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; }
+.kicker a { color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 800; font-size: clamp(2.2rem, 9vw, 3.4rem); line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 14px; text-wrap: balance; }
+h1 .t { border-radius: 6px; padding: 0 0.06em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+h1 .t:nth-child(odd) { background: var(--tok-a); }
+h1 .t:nth-child(even) { background: var(--tok-b); }
+.lede { font-size: 1.08rem; margin: 0 0 22px; max-width: 34em; }
+
+.demo { background: var(--surface); border: 1.5px solid var(--ink); border-radius: 16px; padding: 18px 16px 16px; }
+.demo-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 10px; }
+
+/* Memory bar */
+.mem { display: flex; height: 44px; border-radius: 8px; overflow: hidden; border: 1px solid var(--rule); background: var(--surface); }
+.mem > div { position: relative; min-width: 0; display: flex; align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 600; white-space: nowrap; overflow: hidden; transition: flex-basis .3s ease; }
+.mem .w { background: var(--weights); color: #fff; }
+.mem .o { background: var(--over); }
+.mem .k { background: var(--decode-tint); color: var(--ink); justify-content: flex-start; }
+.mem .k .kfill { position: absolute; inset: 0 auto 0 0; width: 100%; background: var(--decode); transition: width .25s linear; }
+.mem .k span { position: relative; padding-left: 8px; color: #fff; text-shadow: 0 0 2px rgba(0,0,0,.25); }
+.mem .h { background: repeating-linear-gradient(135deg, var(--off) 0 3px, transparent 3px 7px); color: var(--muted); }
+.mem-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 8px; }
+.mem-legend b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+.sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+.sw.w { background: var(--weights); } .sw.o { background: var(--over); } .sw.k { background: var(--decode); }
+.sw.h { background: repeating-linear-gradient(135deg, var(--off) 0 2px, transparent 2px 4px); box-shadow: inset 0 0 0 1px var(--off); }
+.sw.kv { background: var(--decode); } .sw.vv { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+
+.users { display: grid; grid-template-columns: repeat(auto-fill, minmax(13px, 1fr)); gap: 4px; margin: 14px 0 6px; }
+.u { aspect-ratio: 1; border-radius: 50%; border: 1.5px solid var(--rule); background: transparent; transition: background-color .15s, border-color .15s; }
+.u.on { background: var(--decode); border-color: var(--decode); }
+.u.wait { border: 2px dashed var(--bad); }
+.demo-stats { display: flex; justify-content: space-between; gap: 8px; font-size: 0.82rem; color: var(--muted); }
+.demo-stats b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.demo-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-top: 12px; }
+.status { font-size: 0.92rem; min-height: 3em; margin: 0; flex: 1 1 260px; }
+@media (max-width: 480px) { .status { min-height: 4.6em; } }
+
+button, .seg button { font: inherit; font-size: 0.92rem; font-weight: 500; color: var(--ink); cursor: pointer; background: var(--surface); border: 1.5px solid var(--ink); border-radius: 999px; padding: 7px 16px; }
+button:hover { background: var(--band); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--ink); color: var(--paper); }
+button.primary:hover { opacity: .9; background: var(--ink); }
+
+.toc { padding: 26px 0 6px; }
+.toc h2 { font-family: var(--display); font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.toc ol { margin: 0; padding-left: 1.4em; columns: 2; column-gap: 28px; font-size: 0.95rem; }
+.toc li { break-inside: avoid; margin: 2px 0; }
+@media (max-width: 480px) { .toc ol { columns: 1; } }
+
+section.step { padding: 36px 0 8px; scroll-margin-top: 12px; }
+.step-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.step-head.plain { border-top: 2px solid var(--ink); padding-top: 14px; }
+.num { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--ink); display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 1.05rem; }
+h2 { font-family: var(--display); font-weight: 800; font-size: 1.6rem; line-height: 1.2; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h3 { font-family: var(--display); font-weight: 600; font-size: 1.1rem; margin: 22px 0 6px; }
+p { margin: 0 0 14px; }
+.key { border-left: 3px solid var(--ink); padding: 2px 0 2px 14px; margin: 18px 0 8px; font-weight: 500; }
+.key span { display: block; font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+figure { margin: 18px 0; }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 16px; }
+figcaption { font-size: 0.86rem; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+.fig-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 12px; }
+.note { font-size: 0.8rem; color: var(--muted); }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--band); border-radius: 4px; padding: 0 4px; }
+
+.chip { font-family: var(--mono); font-size: 0.84rem; line-height: 1.5; white-space: pre; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink); display: inline-block; }
+.chip.d { background: var(--decode-tint); border-color: var(--decode); }
+
+/* Step 1 attention rows */
+.att-new { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; font-size: 0.9rem; }
+.vec { display: inline-grid; place-items: center; min-width: 26px; height: 22px; padding: 0 5px; border-radius: 5px; font-family: var(--mono); font-size: 0.78rem; font-weight: 500; }
+.vec.q { border: 1.5px solid var(--ink); }
+.vec.k { background: var(--decode); color: #fff; }
+.vec.v { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.att-row { display: grid; grid-template-columns: 118px 30px 1fr 42px 30px; gap: 8px; align-items: center; margin: 6px 0; font-size: 0.84rem; }
+.att-row .chip { justify-self: start; font-size: 0.74rem; padding: 1px 4px; }
+.att-row .pct { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.att-head { display: grid; grid-template-columns: 118px 30px 1fr 42px 30px; gap: 8px; font-size: 0.74rem; color: var(--muted); margin-bottom: 2px; }
+.track { position: relative; height: 14px; border-radius: 4px; background-image: linear-gradient(to right, var(--rule) 1px, transparent 1px); background-size: 25% 100%; }
+.fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; min-width: 2px; transition: width .3s ease; background: var(--decode); }
+.att-out { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule); font-size: 0.9rem; }
+@media (max-width: 400px) { .att-row, .att-head { grid-template-columns: 112px 24px 1fr 36px 24px; gap: 6px; } }
+
+/* Step 2 grids */
+.grids { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 480px) { .grids { grid-template-columns: 1fr; } }
+.grid-panel h4 { margin: 0 0 6px; font-size: 0.88rem; font-weight: 600; }
+.cells { display: grid; grid-template-columns: repeat(12, 1fr); gap: 2px; }
+.c { aspect-ratio: 1; border-radius: 2px; background: transparent; }
+.c.work { background: var(--decode); }
+.c.workp { background: var(--prefill); }
+.c.cached { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); opacity: .7; }
+.c.cachedp { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); opacity: .7; }
+.grid-count { font-size: 0.84rem; color: var(--muted); margin-top: 6px; }
+.grid-count b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.grid-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 12px; }
+.sw.wk { background: var(--decode); } .sw.wkp { background: var(--prefill); } .sw.ca { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+
+/* Formula chain */
+.chain { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; margin: 4px 0 14px; }
+.term { background: var(--paper); border-radius: 10px; padding: 8px 10px 6px; text-align: center; min-width: 62px; }
+.term b { display: block; font-family: var(--display); font-weight: 800; font-size: 1.35rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.term span { display: block; font-size: 0.72rem; color: var(--muted); line-height: 1.25; margin-top: 2px; }
+.op { align-self: center; font-family: var(--display); font-weight: 600; color: var(--muted); }
+.term.res { background: var(--decode-tint); box-shadow: inset 0 0 0 1.5px var(--decode); }
+
+.tokgrid { display: grid; grid-template-columns: 34px 1fr; gap: 6px; }
+.layers-lab { writing-mode: vertical-rl; transform: rotate(180deg); font-size: 0.75rem; color: var(--muted); text-align: center; }
+.kvgrid { display: grid; grid-template-columns: repeat(16, 1fr); gap: 2px; }
+.kvgrid i { display: block; height: 7px; border-radius: 1.5px; background: var(--decode); }
+.kvgrid i.v { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.kvhead { display: grid; grid-template-columns: 1fr 1fr; font-size: 0.74rem; color: var(--muted); text-align: center; margin: 0 0 4px 40px; }
+
+/* Controls */
+.controls { display: grid; gap: 14px; margin-bottom: 16px; }
+.ctl label, .ctl .ctl-name { display: block; font-size: 0.84rem; color: var(--muted); margin-bottom: 5px; }
+.ctl output { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { padding: 5px 13px; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+input[type=range] { width: 100%; accent-color: var(--decode); height: 28px; margin: 0; }
+.readouts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 4px 0 14px; }
+.ro { background: var(--paper); border-radius: 10px; padding: 10px 10px 8px; }
+.ro b { display: block; font-family: var(--display); font-weight: 800; font-size: 1.4rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ro span { display: block; font-size: 0.76rem; color: var(--muted); line-height: 1.3; margin-top: 3px; }
+@media (max-width: 400px) { .ro b { font-size: 1.15rem; } }
+
+/* Sequence list */
+.seq { list-style: none; counter-reset: s; padding: 0; margin: 0 0 16px; display: grid; gap: 10px; }
+.seq li { counter-increment: s; display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
+.seq li::before { content: counter(s); display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--band); font-family: var(--display); font-weight: 800; font-size: 0.85rem; }
+
+/* Log card */
+.log { font-family: var(--mono); font-size: 0.78rem; line-height: 1.55; background: var(--band); border-radius: 10px; padding: 12px 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0 0; }
+.log .i { color: var(--muted); }
+.log .e { color: var(--bad); }
+.log b { font-weight: 500; color: var(--ink); }
+
+/* Compare bars */
+.cmpbar { margin: 8px 0; }
+.cmpbar .lab { display: flex; justify-content: space-between; gap: 8px; font-size: 0.84rem; margin-bottom: 3px; }
+.cmpbar .lab b { font-variant-numeric: tabular-nums; }
+.cmpbar .track { height: 18px; background-size: 25% 100%; }
+.fill.req { background: transparent; box-shadow: inset 0 0 0 2px var(--bad); background-image: repeating-linear-gradient(135deg, var(--bad-tint) 0 4px, transparent 4px 8px); }
+
+/* Planner */
+.presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.presets button { font-size: 0.84rem; padding: 5px 12px; border-width: 1.5px; }
+.verdict { border-radius: 10px; padding: 10px 12px; margin: 12px 0; font-size: 0.92rem; }
+.verdict.ok { background: var(--good-tint); box-shadow: inset 3px 0 0 var(--good); }
+.verdict.no { background: var(--bad-tint); box-shadow: inset 3px 0 0 var(--bad); }
+.verdict b.t { display: block; font-weight: 600; }
+.verdict ul { margin: 6px 0 0; padding-left: 1.1em; }
+.reqrow { margin-top: 10px; }
+.reqrow .lab { font-size: 0.8rem; color: var(--muted); margin-bottom: 3px; display: flex; justify-content: space-between; gap: 8px; }
+.reqrow .lab b { color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.reqtrack { position: relative; height: 12px; }
+.reqfill { position: absolute; top: 0; bottom: 0; border-radius: 3px; background: var(--decode); transition: left .3s, width .3s; }
+.reqfill.over { background: repeating-linear-gradient(135deg, var(--bad) 0 3px, transparent 3px 6px); box-shadow: inset 0 0 0 1.5px var(--bad); }
+
+/* Levers */
+.levers { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.levers li { padding: 12px 0 12px 12px; border-bottom: 1px solid var(--rule); box-shadow: inset 3px 0 0 var(--decode); }
+.levers li:last-child { border-bottom: 0; }
+.levers .flag { font-family: var(--mono); font-size: 0.86rem; font-weight: 500; display: block; margin-bottom: 2px; }
+.levers p { margin: 0; font-size: 0.95rem; }
+.levers .cost { display: block; font-size: 0.84rem; color: var(--muted); margin-top: 3px; }
+
+.callout { background: var(--band); border-radius: 14px; padding: 16px; margin: 18px 0; }
+.callout b.h { font-family: var(--display); font-size: 1.1rem; display: block; margin-bottom: 6px; }
+
+/* Quiz */
+.q { border-top: 1px solid var(--rule); padding: 14px 0 6px; }
+.q p { margin: 0 0 8px; font-weight: 500; }
+.q p .qn { font-family: var(--display); font-weight: 800; margin-right: 6px; }
+details summary { cursor: pointer; color: var(--decode); font-weight: 500; font-size: 0.92rem; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "+"; display: inline-block; width: 1em; font-weight: 600; }
+details[open] summary::before { content: "\2212"; }
+details .ans { margin: 8px 0 10px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; font-size: 0.95rem; }
+.recap ol { padding-left: 1.3em; margin: 0 0 14px; }
+.recap li { margin: 4px 0; }
+.next { background: var(--band); border-radius: 14px; padding: 18px; margin: 18px 0 8px; }
+.next b { font-family: var(--display); font-size: 1.15rem; display: block; margin-bottom: 4px; }
+.sources { font-size: 0.82rem; color: var(--muted); padding: 24px 0 48px; }
+.sources ul { padding-left: 1.1em; margin: 6px 0 0; }
+.sources a { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="progress" aria-hidden="true"><span id="prog"></span></div>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="kicker"><span>Inference track, lesson 2 of 8</span><a href="https://claude.ai/artifact/8m8maPTnDHsbPQWnqjz1bA">Back to your prep plan</a></p>
+    <h1 aria-label="How many tokens fit on your GPU?"><span class="t">How</span><span class="t"> many</span><span class="t"> tokens</span><span class="t"> fit</span><span class="t"> on</span><span class="t"> your</span><span class="t"> GPU</span><span class="t">?</span></h1>
+    <p class="lede">Every token a conversation keeps takes GPU memory. Watch the memory fill, then learn the math and the two vLLM flags that decide how many users you can serve.</p>
+
+    <div class="demo" id="demo">
+      <p class="demo-title">One A100 80GB serving Llama 3.1 8B, every conversation 4,096 tokens long</p>
+      <div class="mem" id="heroMem" role="img" aria-label="80 GB of GPU memory: 16 GB weights, 2 GB overhead, 54 GB KV cache, 8 GB held back">
+        <div class="w" style="flex-basis:20.1%">Weights</div>
+        <div class="o" style="flex-basis:2.5%"></div>
+        <div class="k" style="flex-basis:67.4%"><div class="kfill" id="heroFill"></div><span>KV cache</span></div>
+        <div class="h" style="flex-basis:10%"></div>
+      </div>
+      <div class="mem-legend">
+        <span><i class="sw w"></i>Weights <b>16 GB</b></span>
+        <span><i class="sw o"></i>Overhead <b>~2 GB</b></span>
+        <span><i class="sw k"></i>KV cache <b>54 GB</b></span>
+        <span><i class="sw h"></i>Held back <b>8 GB</b></span>
+      </div>
+      <div class="users" id="users" role="img" aria-label="100 conversations fit; the 101st has to wait"></div>
+      <div class="demo-stats"><span>Each dot is one 4,096-token conversation</span><span><b id="userCount">100</b> fit</span></div>
+      <div class="demo-foot">
+        <p class="status" id="status" aria-live="polite"><b>Full.</b> 100 conversations hold 54 GB of KV cache. Conversation 101 (dashed) waits until one finishes.</p>
+        <button class="primary" id="replay" type="button">Fill the memory</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <nav class="toc" aria-label="Lesson steps">
+    <h2>In this lesson</h2>
+    <ol>
+      <li><a href="#kv">What K and V are</a></li>
+      <li><a href="#why-cache">Why caching pays</a></li>
+      <li><a href="#size">One token's footprint</a></li>
+      <li><a href="#budget">How vLLM splits the GPU</a></li>
+      <li><a href="#max-len">max_model_len</a></li>
+      <li><a href="#planner">Plan your server</a></li>
+      <li><a href="#levers">Levers for more room</a></li>
+      <li><a href="#quiz">Check yourself</a></li>
+    </ol>
+  </nav>
+
+  <!-- 1 -->
+  <section class="step" id="kv">
+    <div class="step-head"><span class="num">1</span><h2>What K and V are</h2></div>
+    <p>Inside every layer, attention lets each token look back at earlier ones. To do that, each token is turned into three small vectors:</p>
+    <ul>
+      <li><strong>Query (Q)</strong>: what this token is looking for.</li>
+      <li><strong>Key (K)</strong>: what this token can be found by.</li>
+      <li><strong>Value (V)</strong>: what this token passes on when it is found.</li>
+    </ul>
+    <p>Think of a search engine: the query is what you type, keys are page titles, values are the pages. The new token's query is matched against every earlier key, and the best matches pass on more of their value.</p>
+    <figure class="fig">
+      <p class="fig-title">The new token <span class="chip d"> print</span> looks back (one head, one layer)</p>
+      <p class="note" style="margin:-4px 0 12px">Its query (Q) is compared with each earlier key (K). The match decides how much of that token's value (V) flows in.</p>
+      <div class="att-head" aria-hidden="true"><span>Earlier token</span><span>Key</span><span>How well it matches</span><span></span><span>Value</span></div>
+      <div id="attRows"></div>
+      <div class="att-out">Output: a blend of the values, mostly <span class="chip"> instructions</span>, a little of the rest.</div>
+      <figcaption>Made-up match weights for illustration. A real model does this in all 32 layers, for 32 query heads each, on every pass.</figcaption>
+    </figure>
+    <p>Here's the useful part. An earlier token's key and value <em>never change</em>. Next pass, and every pass after, they are exactly the same. So the engine keeps them in GPU memory instead of recomputing them. That store is the <strong>KV cache</strong>. Queries are only needed for the newest token, so they are not cached.</p>
+    <p class="key"><span>Key idea</span>The KV cache holds every past token's keys and values, in every layer, so each new token only computes its own.</p>
+  </section>
+
+  <!-- 2 -->
+  <section class="step" id="why-cache">
+    <div class="step-head"><span class="num">2</span><h2>Why caching pays</h2></div>
+    <p>Without a cache, every decode pass would push the whole conversation through the model again. With one, each pass does work for just one token and reads the rest from memory.</p>
+    <figure class="fig">
+      <p class="fig-title">A 4-token prompt, then 8 decode passes. Each row is a pass, each square a token.</p>
+      <div class="grids">
+        <div class="grid-panel"><h4>Without a KV cache</h4><div class="cells" id="gridNo"></div><p class="grid-count"><b>60</b> tokens computed</p></div>
+        <div class="grid-panel"><h4>With a KV cache</h4><div class="cells" id="gridYes"></div><p class="grid-count"><b>11</b> tokens computed</p></div>
+      </div>
+      <div class="grid-legend"><span><i class="sw wkp"></i>computed in prefill</span><span><i class="sw wk"></i>computed in decode</span><span><i class="sw ca"></i>read from the cache</span></div>
+    </figure>
+    <figure class="fig">
+      <p class="fig-title">Now at real sizes: a 1,000-token prompt</p>
+      <div class="controls"><div class="ctl"><label for="nIn">Reply length: <output id="nOut">300 tokens</output></label><input type="range" id="nIn" min="50" max="4000" step="50" value="300"></div></div>
+      <div class="readouts" aria-live="polite">
+        <div class="ro"><b id="roNo">344,850</b><span>token computations without a cache</span></div>
+        <div class="ro"><b id="roYes">1,299</b><span>with a cache</span></div>
+        <div class="ro"><b id="roX">265×</b><span>less work</span></div>
+      </div>
+      <figcaption>Without a cache the work grows with the square of the reply length. With one, it grows in a straight line, and memory pays the price.</figcaption>
+    </figure>
+    <p class="key"><span>Key idea</span>The KV cache trades memory for compute. That trade is why memory, not math, decides how many users fit.</p>
+  </section>
+
+  <!-- 3 -->
+  <section class="step" id="size">
+    <div class="step-head"><span class="num">3</span><h2>One token's footprint</h2></div>
+    <p>Every token in the cache stores a key and a value, in every layer, for every KV head. Multiply it out for Llama 3.1 8B:</p>
+    <div class="chain" role="math" aria-label="2 times 32 layers times 8 KV heads times 128 numbers times 2 bytes equals 131,072 bytes, which is 128 KiB">
+      <div class="term"><b>2</b><span>K and V</span></div><span class="op">×</span>
+      <div class="term"><b>32</b><span>layers</span></div><span class="op">×</span>
+      <div class="term"><b>8</b><span>KV heads</span></div><span class="op">×</span>
+      <div class="term"><b>128</b><span>numbers per head</span></div><span class="op">×</span>
+      <div class="term"><b>2</b><span>bytes each (16-bit)</span></div><span class="op">=</span>
+      <div class="term res"><b>128 KiB</b><span>131,072 bytes per token</span></div>
+    </div>
+    <figure class="fig">
+      <p class="fig-title">One token's KV cache, drawn out: 512 small vectors</p>
+      <div class="kvhead" aria-hidden="true"><span>8 keys</span><span>8 values</span></div>
+      <div class="tokgrid">
+        <div class="layers-lab" aria-hidden="true">32 layers, top to bottom</div>
+        <div class="kvgrid" id="kvgrid" role="img" aria-label="A grid of 32 rows by 16 columns: in each layer, 8 key vectors and 8 value vectors"></div>
+      </div>
+      <figcaption>Each square is one head's key or value: 128 numbers × 2 bytes = 256 bytes. 512 squares × 256 bytes = 128 KiB. Every token you keep needs its own copy of this whole grid.</figcaption>
+    </figure>
+    <h3>Why only 8 KV heads?</h3>
+    <p>Llama 3.1 8B has 32 attention heads but only 8 KV heads. Groups of 4 query heads share one key and value. This is <strong>grouped-query attention</strong>. Without it, the cache would be 4 times bigger: 512 KiB per token.</p>
+    <figure class="fig">
+      <p class="fig-title">Try other models</p>
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="mLab">Model</span><div class="seg" id="mSeg" role="group" aria-labelledby="mLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="dLab">KV cache precision</span><div class="seg" id="dSeg" role="group" aria-labelledby="dLab"></div></div>
+      </div>
+      <div class="readouts" aria-live="polite">
+        <div class="ro"><b id="roTok">128 KiB</b><span>per token</span></div>
+        <div class="ro"><b id="ro4k">512 MiB</b><span>one 4,096-token chat</span></div>
+        <div class="ro"><b id="ro128">16 GiB</b><span>one 131,072-token chat</span></div>
+      </div>
+      <p class="note" id="mNote">32 layers, 8 KV heads, 128 numbers per head.</p>
+    </figure>
+    <p class="key"><span>Key idea</span>KV per token = 2 × layers × KV heads × head size × bytes. Learn this formula; interviewers ask for it.</p>
+  </section>
+
+  <!-- 4 -->
+  <section class="step" id="budget">
+    <div class="step-head"><span class="num">4</span><h2>How vLLM splits the GPU</h2></div>
+    <p>vLLM doesn't grow the KV cache on demand. It carves out one big pool when it starts:</p>
+    <ol class="seq">
+      <li><span>Claim a fraction of the GPU, set by <code>--gpu-memory-utilization</code>. It is 0.9 in most versions; some newer releases default to 0.92, so check <code>vllm serve --help</code> for yours.</span></li>
+      <li><span>Load the model weights.</span></li>
+      <li><span>Run a dummy batch to measure the peak memory for activations, plus CUDA graphs in recent versions.</span></li>
+      <li><span>Turn everything that is left into the KV cache, cut into blocks of 16 tokens.</span></li>
+      <li><span>Print the result in the startup log.</span></li>
+    </ol>
+    <figure class="fig">
+      <p class="fig-title">A100 80GB, Llama 3.1 8B in 16-bit, defaults</p>
+      <div class="mem" role="img" aria-label="80 GB split into 16 GB weights, 2 GB overhead, 54 GB KV cache, 8 GB held back">
+        <div class="w" style="flex-basis:20.1%">16 GB</div>
+        <div class="o" style="flex-basis:2.5%"></div>
+        <div class="k" style="flex-basis:67.4%"><div class="kfill"></div><span>KV cache, 54 GB</span></div>
+        <div class="h" style="flex-basis:10%"></div>
+      </div>
+      <div class="mem-legend"><span><i class="sw w"></i>Weights</span><span><i class="sw o"></i>Activations and CUDA graphs (assumed ~2 GB)</span><span><i class="sw k"></i>KV cache</span><span><i class="sw h"></i>Not claimed (10%)</span></div>
+      <div class="log" role="img" aria-label="Approximate startup log lines"><span class="i">INFO</span> Available KV cache memory: <b>50.24 GiB</b>
+<span class="i">INFO</span> GPU KV cache size: <b>411,529 tokens</b>
+<span class="i">INFO</span> Maximum concurrency for 131,072 tokens per request: <b>3.14x</b></div>
+      <figcaption>Approximate log lines for this setup; the exact numbers depend on your vLLM version and its measured overhead. Note the log uses GiB (2³⁰ bytes).</figcaption>
+    </figure>
+    <p>Read those lines like this. <strong>GPU KV cache size</strong> is the total number of tokens all live requests share. <strong>Maximum concurrency</strong> divides that by the longest allowed request: how many full-length requests could run at once.</p>
+    <p class="key"><span>Key idea</span>KV pool = (GPU memory × utilization) − weights − overhead. Every capacity number follows from that one subtraction.</p>
+  </section>
+
+  <!-- 5 -->
+  <section class="step" id="max-len">
+    <div class="step-head"><span class="num">5</span><h2>max_model_len: the startup check</h2></div>
+    <p><code>--max-model-len</code> is the longest prompt plus reply one request may have. If you don't set it, vLLM takes the model's own limit: 131,072 tokens for Llama 3.1.</p>
+    <p>At startup, vLLM checks that at least one request of that full length fits in the KV pool. For Llama 3.1 8B that one request needs 131,072 × 128 KiB = 16 GiB. If the pool is smaller, the server stops with an error.</p>
+    <figure class="fig">
+      <p class="fig-title">A real failure: Llama 3.1 8B on a smaller memory budget</p>
+      <div class="cmpbar"><div class="lab"><span>One request at max_model_len</span><b>131,072 tokens</b></div><div class="track"><div class="fill req" style="width:100%"></div></div></div>
+      <div class="cmpbar"><div class="lab"><span>What the KV pool could hold</span><b>30,544 tokens</b></div><div class="track"><div class="fill" style="width:23.3%"></div></div></div>
+      <div class="log"><span class="e">ValueError:</span> The model's max seq len (131072) is larger than
+the maximum number of tokens that can be stored in KV cache (30544).</div>
+      <figcaption>From a user report on NVIDIA's forum. The full message ends by suggesting two fixes: raise <code>gpu_memory_utilization</code> or lower <code>max_model_len</code>.</figcaption>
+    </figure>
+    <p>Two things surprise people. First, lowering <code>--max-model-len</code> does not shrink the memory vLLM takes. The pool stays the same size; only how many full-length requests fit at once changes. Second, recent vLLM versions may shrink the limit for you and log "Auto-fit max_model_len" instead of failing, so read your startup log.</p>
+    <p>And vLLM doesn't set aside a full max-length slot for every request. Each one only uses blocks for the tokens it actually has. Lesson 3 shows how.</p>
+    <p class="key"><span>Key idea</span>max_model_len is a promise you make to every request. Promise only what your traffic needs, and the server starts and packs more users.</p>
+  </section>
+
+  <!-- 6 -->
+  <section class="step" id="planner">
+    <div class="step-head"><span class="num">6</span><h2>Plan your server</h2></div>
+    <p>Put it all together. Pick a setup, and the planner does the same subtraction vLLM does at startup, then tells you whether the server would start.</p>
+    <figure class="fig">
+      <div class="presets" role="group" aria-label="Presets">
+        <button type="button" data-preset="a100">A100 80GB defaults</button>
+        <button type="button" data-preset="attacker">Your attacker model (assumed)</button>
+      </div>
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="pgLab">GPU memory</span><div class="seg" id="pgSeg" role="group" aria-labelledby="pgLab"></div></div>
+        <div class="ctl"><label for="uIn"><code>--gpu-memory-utilization</code>: <output id="uOut">0.90</output></label><input type="range" id="uIn" min="0.2" max="0.98" step="0.01" value="0.9"></div>
+        <div class="ctl"><span class="ctl-name" id="pmLab">Model</span><div class="seg" id="pmSeg" role="group" aria-labelledby="pmLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="pwLab">Weight precision</span><div class="seg" id="pwSeg" role="group" aria-labelledby="pwLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="pkLab"><code>--kv-cache-dtype</code></span><div class="seg" id="pkSeg" role="group" aria-labelledby="pkLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="plLab"><code>--max-model-len</code></span><div class="seg" id="plSeg" role="group" aria-labelledby="plLab"></div></div>
+        <div class="ctl"><label for="oIn">Activations and CUDA graphs (assumption): <output id="oOut">2.0 GB</output></label><input type="range" id="oIn" min="0.5" max="6" step="0.5" value="2"></div>
+      </div>
+      <div class="mem" id="pMem" role="img" aria-label="GPU memory split"></div>
+      <div class="mem-legend" id="pLegend"></div>
+      <div class="reqrow"><div class="lab"><span>One full-length request, same scale</span><b id="reqLab"></b></div><div class="reqtrack"><div class="reqfill" id="reqFill"></div></div></div>
+      <div class="verdict" id="verdict" aria-live="polite"></div>
+      <div class="readouts">
+        <div class="ro"><b id="pTok">411,529</b><span>tokens in the KV pool</span></div>
+        <div class="ro"><b id="pConc">3.14×</b><span>full-length requests at once</span></div>
+        <div class="ro"><b id="p4k">100</b><span>4,096-token chats at once</span></div>
+      </div>
+      <div class="log" id="pLog"></div>
+      <figcaption>Decimal GB except in the log lines. The overhead is a guess; replace it with the real number from your startup log.</figcaption>
+    </figure>
+    <div class="callout">
+      <b class="h">Worked example: your attacker model</b>
+      <p>Suppose your 0.3 share means vLLM gets 30% of an 80 GB A100, about 24 GB. Take away 16 GB of weights and ~2 GB of overhead and about 6 GB is left: roughly 45,000 tokens of KV cache.</p>
+      <p style="margin:0">Left at the model's default of 131,072 tokens, that server would not start. Set <code>--max-model-len 8192</code> and it starts with room for about 5 attack conversations at full length at once. Tap "Your attacker model" above to see it, then compare with your real startup log.</p>
+    </div>
+    <p class="key"><span>Key idea</span>Capacity planning is one subtraction and one division. Do it before you deploy, then check it against the log.</p>
+  </section>
+
+  <!-- 7 -->
+  <section class="step" id="levers">
+    <div class="step-head"><span class="num">7</span><h2>Levers for more room</h2></div>
+    <p>When the pool is too small, these are your options, roughly in the order to try them.</p>
+    <ul class="levers">
+      <li><span class="flag">--max-model-len</span><p>Set it to what your traffic really needs. The server starts, and more full-length requests fit at once.</p><span class="cost">Cost: longer requests are rejected. The pool size doesn't change.</span></li>
+      <li><span class="flag">--kv-cache-dtype fp8</span><p>Stores keys and values in 8 bits, roughly doubling the tokens that fit.</p><span class="cost">Cost: a small accuracy drop; in vLLM's tests, 0.7 to 2 points on reasoning without calibration. Run your own evals.</span></li>
+      <li><span class="flag">--gpu-memory-utilization</span><p>Lets vLLM claim more of the GPU for the pool.</p><span class="cost">Cost: less safety headroom. Risky when other processes share the GPU, as with your fractional share.</span></li>
+      <li><span class="flag">8-bit or 4-bit weights</span><p>Shrinks the weights and hands the freed memory to the pool: 8 GB more for an 8B model at 8-bit.</p><span class="cost">Cost: check quality on your evals. Lesson 5.</span></li>
+      <li><span class="flag">Prefix caching</span><p>Requests that start with the same text, like a shared system prompt, store that prefix once. Recent vLLM versions turn it on by default; older ones need <code>--enable-prefix-caching</code>.</p><span class="cost">Only helps when prompts share a prefix. Lesson 4.</span></li>
+      <li><span class="flag">--tensor-parallel-size</span><p>Splits the weights and the KV heads across several GPUs.</p><span class="cost">Cost: more GPUs and traffic between them. Lesson 6.</span></li>
+    </ul>
+    <p class="key"><span>Key idea</span>Shrink the promise (max_model_len), then the bytes (fp8 KV, smaller weights), then add hardware.</p>
+  </section>
+
+  <!-- Quiz -->
+  <section class="step" id="quiz">
+    <div class="step-head plain"><h2>Check yourself</h2></div>
+    <p>Answer each one out loud or in chat first, then open the answer.</p>
+    <div class="q"><p><span class="qn">1</span>Llama 3.1 70B has 80 layers, 8 KV heads and 128 numbers per head. How much KV cache does one token take in 16-bit?</p>
+      <details><summary>Show answer</summary><div class="ans">2 × 80 × 8 × 128 × 2 = 327,680 bytes, or 320 KiB per token: 2.5 times the 8B model, because it has 2.5 times the layers.</div></details></div>
+    <div class="q"><p><span class="qn">2</span>Your attacker pod fails at startup with "max seq len (131072) is larger than the maximum number of tokens that can be stored in KV cache". What do you change first?</p>
+      <details><summary>Show answer</summary><div class="ans">Lower <code>--max-model-len</code> to what attack conversations actually need, such as 8,192. Raising <code>--gpu-memory-utilization</code> is risky on a shared GPU, and it can't add memory your share doesn't have. FP8 KV cache is the next option if you need longer contexts.</div></details></div>
+    <div class="q"><p><span class="qn">3</span>Grouped-query attention makes the KV cache 4 times smaller. Why doesn't it make single-request decode 4 times faster?</p>
+      <details><summary>Show answer</summary><div class="ans">At batch size 1, each pass reads 16 GB of weights but only about 0.5 GB of KV cache for a 4,096-token chat. The weights dominate. A smaller cache pays off with long contexts and big batches, where KV reads and memory become the limit.</div></details></div>
+    <div class="q"><p><span class="qn">4</span>How many 4,096-token conversations fit on one A100 80GB serving Llama 3.1 8B in 16-bit, at utilization 0.9 with 2 GB of overhead?</p>
+      <details><summary>Show answer</summary><div class="ans">Pool = 72 − 16.06 − 2 ≈ 53.9 GB. One conversation = 4,096 × 131,072 bytes ≈ 0.54 GB. 53.9 ÷ 0.54 ≈ 100 conversations.</div></details></div>
+    <div class="q"><p><span class="qn">5</span>100 attack prompts run at once, and all share the same 2,000-token system prompt. How much KV cache does that shared prefix take, and what feature cuts it?</p>
+      <details><summary>Show answer</summary><div class="ans">100 × 2,000 × 128 KiB ≈ 26 GB, the same text stored 100 times. Prefix caching stores it once (about 0.26 GB) and skips its prefill too. That's Lesson 4.</div></details></div>
+  </section>
+
+  <section class="step recap" id="next">
+    <div class="step-head plain"><h2>What to remember</h2></div>
+    <ol>
+      <li>The KV cache keeps every past token's keys and values, so each pass computes only the new token.</li>
+      <li>KV per token = 2 × layers × KV heads × head size × bytes: 128 KiB for Llama 3.1 8B in 16-bit.</li>
+      <li>vLLM's pool = GPU memory × utilization − weights − overhead, fixed at startup.</li>
+      <li><code>--max-model-len</code> must fit once in the pool, or the server won't start. Lowering it doesn't shrink memory use.</li>
+      <li>For more room: lower max_model_len, use FP8 KV, shrink weights, then add GPUs.</li>
+    </ol>
+    <div class="next"><b>Next: Lesson 3, Batching and PagedAttention</b>Why vLLM never reserves a full max_model_len slot per request, and how continuous batching keeps the GPU full on every pass.</div>
+    <p style="margin-top:14px"><a href="https://claude.ai/artifact/USZqxTneUzroaqdQZYrx37">Back to Lesson 1</a></p>
+  </section>
+
+  <footer class="sources">
+    Sources
+    <ul>
+      <li><a href="https://huggingface.co/snx999/dev3/blob/main/config.json">Llama 3.1 8B Instruct config</a>: 32 layers, 32 attention heads, 8 KV heads, head size 128, 131,072-token limit</li>
+      <li><a href="https://huggingface.co/PatronusAI/Llama-3.1-70B-Instruct-AWQ-INT4/blob/main/config.json">Llama 3.1 70B config</a>: 80 layers, 8 KV heads, head size 128</li>
+      <li><a href="https://vllm.readthedocs.io/en/latest/models/engine_args.html">vLLM engine arguments</a>: utilization default 0.9, block size 16, KV dtype follows the model</li>
+      <li><a href="https://particula.tech/blog/vllm-kv-cache-oom-debugging">Particula: debugging vLLM KV cache OOM</a>: how the pool is computed, the 0.92 default in newer releases, FP8 KV accuracy</li>
+      <li><a href="https://www.besthub.dev/articles/vllm-production-tuning-the-max-num-seqs-gpu-memory-concurrency-triad-62834e8a5b4e">vLLM production tuning (BestHub)</a>: startup log lines</li>
+      <li><a href="https://forums.developer.nvidia.com/t/problem-with-installation-of-llama-3-1-8b-nim/305569">NVIDIA forum: Llama 3.1 8B max seq len error</a></li>
+      <li><a href="https://discuss.vllm.ai/t/max-model-len-vs-gpu-memory-usage/2724">vLLM forum: max_model_len vs GPU memory</a> and <a href="https://discuss.vllm.ai/t/vllm-v1-forces-me-to-pre-allocate-a-huge-non-reclaimable-gpu-kv-cache-for-long-contexts-and-none-of-the-current-offload-or-quantization-options-solve-the-resulting-vram-bloat-without-crippling-speed/1502">one max-length request must fit</a></li>
+      <li><a href="https://forums.developer.nvidia.com/t/cant-figure-out-why-a-4-bit-model-is-using-so-much-vram-in-vllm/375602">NVIDIA forum: Auto-fit max_model_len log line</a></li>
+    </ul>
+  </footer>
+</main>
+
+<script>
+(function () {
+  const $ = (s) => document.querySelector(s);
+  const fmt = (n, d = 0) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+
+  const prog = $('#prog');
+  const onScroll = () => { const h = document.documentElement; const max = h.scrollHeight - h.clientHeight; prog.style.width = (max > 0 ? h.scrollTop / max * 100 : 0) + '%'; };
+  window.addEventListener('scroll', onScroll, { passive: true }); onScroll();
+
+  /* Hero: fill the memory */
+  const FIT = 100;
+  const usersEl = $('#users'), fillEl = $('#heroFill'), statusEl = $('#status'), countEl = $('#userCount'), btn = $('#replay');
+  const dots = [];
+  for (let i = 0; i <= FIT; i++) { const d = el('div', 'u'); usersEl.appendChild(d); dots.push(d); }
+  function heroFinal() {
+    dots.forEach((d, i) => { d.className = 'u ' + (i < FIT ? 'on' : 'wait'); });
+    fillEl.style.width = (FIT * 0.5369 / 53.94 * 100) + '%';
+    countEl.textContent = FIT;
+  }
+  heroFinal();
+  let timers = [];
+  btn.addEventListener('click', () => {
+    timers.forEach(clearTimeout); timers = [];
+    btn.disabled = true;
+    dots.forEach((d) => { d.className = 'u'; });
+    fillEl.style.width = '0%'; countEl.textContent = '0';
+    statusEl.innerHTML = '<b>Starting.</b> The weights are loaded. The KV pool is empty.';
+    const gap = 32;
+    for (let i = 0; i < FIT; i++) {
+      timers.push(setTimeout(() => {
+        dots[i].className = 'u on';
+        fillEl.style.width = ((i + 1) * 0.5369 / 53.94 * 100) + '%';
+        countEl.textContent = i + 1;
+        if (i % 5 === 4 || i === 0) statusEl.innerHTML = '<b>Filling.</b> ' + (i + 1) + ' conversations hold ' + fmt((i + 1) * 0.5369, 1) + ' GB of KV cache: 0.54 GB each.';
+      }, 600 + i * gap));
+    }
+    timers.push(setTimeout(() => {
+      dots[FIT].className = 'u wait';
+      statusEl.innerHTML = '<b>Full.</b> 100 conversations hold 54 GB of KV cache. Conversation 101 (dashed) waits until one finishes.';
+      btn.disabled = false;
+    }, 600 + FIT * gap + 300));
+  });
+
+  /* Step 1 attention */
+  const ATT = [['Ignore', 0.12], [' all', 0.05], [' previous', 0.08], [' instructions', 0.55], [' and', 0.20]];
+  const attRows = $('#attRows');
+  ATT.forEach(([t, w]) => {
+    const r = el('div', 'att-row');
+    r.appendChild(el('span', 'chip', t));
+    r.appendChild(el('span', 'vec k', 'K'));
+    const tr = el('div', 'track'); const f = el('div', 'fill'); f.style.width = (w * 100) + '%'; tr.appendChild(f); r.appendChild(tr);
+    r.appendChild(el('span', 'pct', Math.round(w * 100) + '%'));
+    r.appendChild(el('span', 'vec v', 'V'));
+    attRows.appendChild(r);
+  });
+
+  /* Step 2 grids: 4-token prompt, 8 passes; columns = 12 token positions */
+  const P0 = 4, N0 = 8, COLS = 12;
+  const gNo = $('#gridNo'), gYes = $('#gridYes');
+  for (let r = 0; r < N0; r++) {
+    const len = P0 + r; // tokens present at pass r
+    for (let c = 0; c < COLS; c++) {
+      const a = el('i', 'c'), b = el('i', 'c');
+      if (c < len) {
+        a.className = 'c ' + (r === 0 ? 'workp' : 'work');
+        if (r === 0) b.className = 'c workp';
+        else b.className = 'c ' + (c === len - 1 ? 'work' : 'cached');
+      }
+      gNo.appendChild(a); gYes.appendChild(b);
+    }
+  }
+  // counts: without = sum_{r=0..7} (4+r) = 32+28 = 60? computed below for honesty
+  let cNo = 0; for (let r = 0; r < N0; r++) cNo += P0 + r;
+  const cYes = P0 + (N0 - 1);
+  gNo.parentElement.querySelector('.grid-count b').textContent = cNo;
+  gYes.parentElement.querySelector('.grid-count b').textContent = cYes;
+
+  const nIn = $('#nIn');
+  function renderWork() {
+    const n = +nIn.value, P = 1000;
+    const no = n * P + n * (n - 1) / 2, yes = P + n - 1;
+    $('#nOut').textContent = fmt(n) + ' tokens';
+    $('#roNo').textContent = fmt(no);
+    $('#roYes').textContent = fmt(yes);
+    $('#roX').textContent = fmt(no / yes) + '×';
+  }
+  nIn.addEventListener('input', renderWork); renderWork();
+
+  /* Step 3 grid + calculator */
+  const kv = $('#kvgrid');
+  for (let r = 0; r < 32; r++) for (let c = 0; c < 16; c++) kv.appendChild(el('i', c >= 8 ? 'v' : null));
+  const MODELS = [
+    { name: 'Llama 3.1 8B', layers: 32, kvh: 8, hd: 128, note: '32 layers, 8 KV heads, 128 numbers per head.' },
+    { name: 'Llama 3.1 70B', layers: 80, kvh: 8, hd: 128, note: '80 layers, 8 KV heads, 128 numbers per head.' },
+    { name: '8B without GQA', layers: 32, kvh: 32, hd: 128, note: 'Hypothetical: the 8B model with one KV head per query head (32), as older models had.' }
+  ];
+  const DT = [{ name: '16-bit', b: 2 }, { name: 'FP8', b: 1 }];
+  const cs = { m: 0, d: 0 };
+  function seg(host, items, obj, key, cb) {
+    const btns = items.map((it, i) => {
+      const b = el('button', null, it.name); b.type = 'button'; b.setAttribute('aria-pressed', String(i === obj[key]));
+      b.addEventListener('click', () => { obj[key] = i; sync(); cb(); });
+      host.appendChild(b); return b;
+    });
+    function sync() { btns.forEach((b, j) => b.setAttribute('aria-pressed', String(j === obj[key]))); }
+    return sync;
+  }
+  const bytesFmt = (b) => {
+    if (b >= 1024 ** 3) return fmt(b / 1024 ** 3, b / 1024 ** 3 < 10 ? 2 : 0).replace(/\.00$/, '') + ' GiB';
+    if (b >= 1024 ** 2) return fmt(b / 1024 ** 2, 0) + ' MiB';
+    return fmt(b / 1024, 0) + ' KiB';
+  };
+  function renderFoot() {
+    const m = MODELS[cs.m], d = DT[cs.d];
+    const per = 2 * m.layers * m.kvh * m.hd * d.b;
+    $('#roTok').textContent = bytesFmt(per);
+    $('#ro4k').textContent = bytesFmt(per * 4096);
+    $('#ro128').textContent = bytesFmt(per * 131072);
+    $('#mNote').textContent = m.note + ' ' + d.name + ' storage: ' + d.b + (d.b === 1 ? ' byte' : ' bytes') + ' per number.';
+  }
+  seg($('#mSeg'), MODELS, cs, 'm', renderFoot);
+  seg($('#dSeg'), DT, cs, 'd', renderFoot);
+  renderFoot();
+
+  /* Step 6 planner */
+  const PG = [{ name: '40 GB', v: 40 }, { name: '80 GB', v: 80 }];
+  const PM = [{ name: 'Llama 3.1 8B', params: 8.03e9, kvt: 131072 }, { name: 'Llama 3.1 70B', params: 70.6e9, kvt: 327680 }];
+  const PW = [{ name: '16-bit', b: 2 }, { name: '8-bit', b: 1 }, { name: '4-bit', b: 0.5 }];
+  const PK = [{ name: 'auto (16-bit)', f: 1 }, { name: 'fp8', f: 0.5 }];
+  const PL = [{ name: '4,096', v: 4096 }, { name: '8,192', v: 8192 }, { name: '32,768', v: 32768 }, { name: '131,072 (default)', v: 131072 }];
+  const ps = { g: 1, m: 0, w: 0, k: 0, l: 3 };
+  const uIn = $('#uIn'), oIn = $('#oIn');
+  const syncs = [
+    seg($('#pgSeg'), PG, ps, 'g', plan), seg($('#pmSeg'), PM, ps, 'm', plan), seg($('#pwSeg'), PW, ps, 'w', plan),
+    seg($('#pkSeg'), PK, ps, 'k', plan), seg($('#plSeg'), PL, ps, 'l', plan)
+  ];
+  [uIn, oIn].forEach((i) => i.addEventListener('input', plan));
+  document.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.preset === 'attacker') { Object.assign(ps, { g: 1, m: 0, w: 0, k: 0, l: 3 }); uIn.value = 0.3; }
+    else { Object.assign(ps, { g: 1, m: 0, w: 0, k: 0, l: 3 }); uIn.value = 0.9; }
+    oIn.value = 2; syncs.forEach((s) => s()); plan();
+  }));
+
+  function plan() {
+    const mem = PG[ps.g].v, util = +uIn.value, over = +oIn.value;
+    const m = PM[ps.m], wb = PW[ps.w].b, kvt = m.kvt * PK[ps.k].f, maxlen = PL[ps.l].v;
+    $('#uOut').textContent = util.toFixed(2);
+    $('#oOut').textContent = over.toFixed(1) + ' GB';
+    const weights = m.params * wb / 1e9;
+    const budget = mem * util;
+    const kvGB = Math.max(0, budget - weights - over);
+    const tokens = Math.floor(kvGB * 1e9 / kvt);
+    const reqGB = maxlen * kvt / 1e9;
+    // memory bar
+    const wv = Math.min(weights, mem), ov = Math.min(over, Math.max(0, mem - wv));
+    const held = Math.max(0, mem - wv - ov - kvGB);
+    const pct = (x) => (x / mem * 100) + '%';
+    const pm = $('#pMem');
+    pm.innerHTML = '';
+    const add = (cls, w, label) => { const d = el('div', cls); d.style.flexBasis = pct(w); if (cls === 'k') { d.appendChild(el('div', 'kfill')); d.appendChild(el('span', null, label)); } else if (label) d.textContent = label; pm.appendChild(d); return d; };
+    add('w', wv, wv / mem > 0.14 ? fmt(weights, weights < 10 ? 1 : 0) + ' GB' : '');
+    add('o', ov, '');
+    if (kvGB > 0) add('k', kvGB, kvGB / mem > 0.18 ? 'KV ' + fmt(kvGB, 1) + ' GB' : '');
+    if (held > 0.01) add('h', held, held / mem > 0.12 ? fmt(held, 0) + ' GB' : '');
+    $('#pLegend').innerHTML = '<span><i class="sw w"></i>Weights <b>' + fmt(weights, 1) + ' GB</b></span><span><i class="sw o"></i>Overhead <b>' + fmt(ov, 1) + ' GB</b></span><span><i class="sw k"></i>KV pool <b>' + fmt(kvGB, 1) + ' GB</b></span><span><i class="sw h"></i>Not claimed <b>' + fmt(Math.max(0, mem - budget), 1) + ' GB</b></span>';
+    pm.setAttribute('aria-label', 'Of ' + mem + ' GB: weights ' + fmt(weights, 1) + ' GB, overhead ' + fmt(ov, 1) + ' GB, KV pool ' + fmt(kvGB, 1) + ' GB');
+    // one-request row
+    const kvStart = Math.min(wv + ov, mem) / mem * 100;
+    const rf = $('#reqFill');
+    const reqPct = reqGB / mem * 100;
+    rf.style.left = kvStart + '%';
+    rf.style.width = Math.min(reqPct, 100 - kvStart) + '%';
+    rf.className = 'reqfill' + (reqGB > kvGB ? ' over' : '');
+    $('#reqLab').textContent = fmt(reqGB, reqGB < 10 ? 2 : 1) + ' GB' + (reqGB > kvGB ? ', more than the pool' : '');
+    // verdict
+    const v = $('#verdict');
+    const conc = tokens / maxlen;
+    const lenName = fmt(maxlen);
+    let html = '', ok = false, log = '';
+    if (weights > mem) {
+      html = '<b class="t">Won’t start: the weights alone need ' + fmt(weights, 0) + ' GB.</b>Use smaller weights or split the model across GPUs with <code>--tensor-parallel-size</code> (Lesson 6).';
+      log = '<span class="e">ERROR</span> CUDA out of memory while loading weights';
+    } else if (budget - weights - over <= 0) {
+      html = '<b class="t">Won’t start: nothing is left for the KV cache.</b><ul><li>Raise <code>--gpu-memory-utilization</code> to at least ' + Math.min(0.98, Math.ceil((weights + over + 1) / mem * 100) / 100).toFixed(2) + ', if the GPU isn’t shared.</li><li>Or use 8-bit or 4-bit weights.</li></ul>';
+      log = '<span class="e">ValueError:</span> No available memory for the cache blocks.';
+    } else if (tokens < maxlen) {
+      const fits = Math.floor(tokens / 1024) * 1024;
+      const uNeed = Math.ceil((weights + over + reqGB) / mem * 100) / 100;
+      const fixes = [];
+      if (fits >= 1024) { const p2 = Math.pow(2, Math.floor(Math.log2(tokens))); fixes.push('Set <code>--max-model-len ' + p2 + '</code> (anything up to ' + fmt(fits) + ' fits). At 8,192 you could run about ' + fmt(tokens / 8192, 1) + ' full-length requests at once.'); }
+      if (PK[ps.k].f === 1 && tokens * 2 >= maxlen) fixes.push('Or add <code>--kv-cache-dtype fp8</code> to double the pool.');
+      if (uNeed <= 0.95) fixes.push('Or raise <code>--gpu-memory-utilization</code> to ' + uNeed.toFixed(2) + ', if the GPU isn’t shared.');
+      html = '<b class="t">Won’t start: one ' + lenName + '-token request needs ' + fmt(reqGB, 1) + ' GB, but the pool has ' + fmt(kvGB, 1) + ' GB.</b><ul><li>' + fixes.join('</li><li>') + '</li></ul>';
+      log = '<span class="e">ValueError:</span> The model’s max seq len (' + maxlen + ') is larger than\nthe maximum number of tokens that can be stored in KV cache (' + tokens + ').';
+    } else {
+      ok = true;
+      html = '<b class="t">Starts. The pool holds ' + fmt(tokens) + ' tokens.</b>That is ' + fmt(conc, 2) + ' requests at the full ' + lenName + ' tokens, or many more shorter ones.';
+      log = '<span class="i">INFO</span> Available KV cache memory: <b>' + fmt(kvGB * 1e9 / 1024 ** 3, 2) + ' GiB</b>\n<span class="i">INFO</span> GPU KV cache size: <b>' + fmt(tokens) + ' tokens</b>\n<span class="i">INFO</span> Maximum concurrency for ' + fmt(maxlen) + ' tokens per request: <b>' + fmt(conc, 2) + 'x</b>';
+    }
+    v.className = 'verdict ' + (ok ? 'ok' : 'no');
+    v.innerHTML = html;
+    $('#pLog').innerHTML = log;
+    $('#pTok').textContent = fmt(tokens);
+    $('#pConc').textContent = fmt(conc, 2) + '×';
+    $('#p4k').textContent = fmt(Math.floor(tokens / 4096));
+  }
+  plan();
+})();
+</script>
+</body>
+</html>
