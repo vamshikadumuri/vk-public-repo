@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How vLLM Packs Many Requests onto One GPU</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+
+:root {
+  /* Layout: same system as Lesson 1. One reading column (max 680px); each step = numbered heading, prose, one framed figure, one key idea.
+     Colour carries meaning: violet = model weights, teal = KV cache (decode memory), grey = overhead, hatched = held back. Amber stays prefill. */
+  --paper: #F4F6F9;
+  --band: #E8ECF2;
+  --surface: #FFFFFF;
+  --ink: #172036;
+  --muted: #586178;
+  --rule: #DCE1EA;
+  --prefill: #C27C0E;
+  --decode: #0088A3;
+  --decode-tint: #DBEEF2;
+  --weights: #7B5BD6;
+  --weights-tint: #EAE4FA;
+  --over: #A3ABB9;
+  --off: #B9C0CC;
+  --tok-a: #E3E8F0;
+  --tok-b: #D3DBE7;
+  --bad: #B42318;
+  --bad-tint: #FCE9E7;
+  --good: #1F7A4A;
+  --good-tint: #E3F3EA;
+  --display: 'Bricolage Grotesque', 'Avenir Next', system-ui, sans-serif;
+  --body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+    --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+    --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+    --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+  --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+  --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+  --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition: none !important; animation: none !important; } }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--body); font-size: 17px; line-height: 1.6; -webkit-text-size-adjust: 100%; }
+a { color: var(--decode); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--decode); outline-offset: 2px; border-radius: 4px; }
+.progress { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 10; }
+.progress span { display: block; height: 100%; width: 0; background: var(--decode); }
+.wrap { max-width: 680px; margin: 0 auto; padding: 0 20px; }
+
+/* Hero */
+.hero { background: var(--band); padding: 40px 0 32px; border-bottom: 1px solid var(--rule); }
+.kicker { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; }
+.kicker a { color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 800; font-size: clamp(2.2rem, 9vw, 3.4rem); line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 14px; text-wrap: balance; }
+h1 .t { border-radius: 6px; padding: 0 0.06em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+h1 .t:nth-child(odd) { background: var(--tok-a); }
+h1 .t:nth-child(even) { background: var(--tok-b); }
+.lede { font-size: 1.08rem; margin: 0 0 22px; max-width: 34em; }
+
+.demo { background: var(--surface); border: 1.5px solid var(--ink); border-radius: 16px; padding: 18px 16px 16px; }
+.demo-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 10px; }
+
+/* Memory bar */
+.mem { display: flex; height: 44px; border-radius: 8px; overflow: hidden; border: 1px solid var(--rule); background: var(--surface); }
+.mem > div { position: relative; min-width: 0; display: flex; align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 600; white-space: nowrap; overflow: hidden; transition: flex-basis .3s ease; }
+.mem .w { background: var(--weights); color: #fff; }
+.mem .o { background: var(--over); }
+.mem .k { background: var(--decode-tint); color: var(--ink); justify-content: flex-start; }
+.mem .k .kfill { position: absolute; inset: 0 auto 0 0; width: 100%; background: var(--decode); transition: width .25s linear; }
+.mem .k span { position: relative; padding-left: 8px; color: #fff; text-shadow: 0 0 2px rgba(0,0,0,.25); }
+.mem .h { background: repeating-linear-gradient(135deg, var(--off) 0 3px, transparent 3px 7px); color: var(--muted); }
+.mem-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 8px; }
+.mem-legend b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+.sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+.sw.w { background: var(--weights); } .sw.o { background: var(--over); } .sw.k { background: var(--decode); }
+.sw.h { background: repeating-linear-gradient(135deg, var(--off) 0 2px, transparent 2px 4px); box-shadow: inset 0 0 0 1px var(--off); }
+.sw.kv { background: var(--decode); } .sw.vv { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+
+.users { display: grid; grid-template-columns: repeat(auto-fill, minmax(13px, 1fr)); gap: 4px; margin: 14px 0 6px; }
+.u { aspect-ratio: 1; border-radius: 50%; border: 1.5px solid var(--rule); background: transparent; transition: background-color .15s, border-color .15s; }
+.u.on { background: var(--decode); border-color: var(--decode); }
+.u.wait { border: 2px dashed var(--bad); }
+.demo-stats { display: flex; justify-content: space-between; gap: 8px; font-size: 0.82rem; color: var(--muted); }
+.demo-stats b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.demo-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-top: 12px; }
+.status { font-size: 0.92rem; min-height: 3em; margin: 0; flex: 1 1 260px; }
+@media (max-width: 480px) { .status { min-height: 4.6em; } }
+
+button, .seg button { font: inherit; font-size: 0.92rem; font-weight: 500; color: var(--ink); cursor: pointer; background: var(--surface); border: 1.5px solid var(--ink); border-radius: 999px; padding: 7px 16px; }
+button:hover { background: var(--band); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--ink); color: var(--paper); }
+button.primary:hover { opacity: .9; background: var(--ink); }
+
+.toc { padding: 26px 0 6px; }
+.toc h2 { font-family: var(--display); font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.toc ol { margin: 0; padding-left: 1.4em; columns: 2; column-gap: 28px; font-size: 0.95rem; }
+.toc li { break-inside: avoid; margin: 2px 0; }
+@media (max-width: 480px) { .toc ol { columns: 1; } }
+
+section.step { padding: 36px 0 8px; scroll-margin-top: 12px; }
+.step-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.step-head.plain { border-top: 2px solid var(--ink); padding-top: 14px; }
+.num { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--ink); display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 1.05rem; }
+h2 { font-family: var(--display); font-weight: 800; font-size: 1.6rem; line-height: 1.2; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h3 { font-family: var(--display); font-weight: 600; font-size: 1.1rem; margin: 22px 0 6px; }
+p { margin: 0 0 14px; }
+.key { border-left: 3px solid var(--ink); padding: 2px 0 2px 14px; margin: 18px 0 8px; font-weight: 500; }
+.key span { display: block; font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+figure { margin: 18px 0; }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 16px; }
+figcaption { font-size: 0.86rem; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+.fig-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 12px; }
+.note { font-size: 0.8rem; color: var(--muted); }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--band); border-radius: 4px; padding: 0 4px; }
+
+.chip { font-family: var(--mono); font-size: 0.84rem; line-height: 1.5; white-space: pre; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink); display: inline-block; }
+.chip.d { background: var(--decode-tint); border-color: var(--decode); }
+
+
+/* Controls */
+.controls { display: grid; gap: 14px; margin-bottom: 16px; }
+.ctl label, .ctl .ctl-name { display: block; font-size: 0.84rem; color: var(--muted); margin-bottom: 5px; }
+.ctl output { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { padding: 5px 13px; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+input[type=range] { width: 100%; accent-color: var(--decode); height: 28px; margin: 0; }
+.readouts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 4px 0 14px; }
+.ro { background: var(--paper); border-radius: 10px; padding: 10px 10px 8px; }
+.ro b { display: block; font-family: var(--display); font-weight: 800; font-size: 1.4rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ro span { display: block; font-size: 0.76rem; color: var(--muted); line-height: 1.3; margin-top: 3px; }
+@media (max-width: 400px) { .ro b { font-size: 1.15rem; } }
+
+/* Sequence list */
+.seq { list-style: none; counter-reset: s; padding: 0; margin: 0 0 16px; display: grid; gap: 10px; }
+.seq li { counter-increment: s; display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
+.seq li::before { content: counter(s); display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--band); font-family: var(--display); font-weight: 800; font-size: 0.85rem; }
+
+/* Log card */
+.log { font-family: var(--mono); font-size: 0.78rem; line-height: 1.55; background: var(--band); border-radius: 10px; padding: 12px 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0 0; }
+.log .i { color: var(--muted); }
+.log .e { color: var(--bad); }
+.log b { font-weight: 500; color: var(--ink); }
+
+/* Quiz */
+.q { border-top: 1px solid var(--rule); padding: 14px 0 6px; }
+.q p { margin: 0 0 8px; font-weight: 500; }
+.q p .qn { font-family: var(--display); font-weight: 800; margin-right: 6px; }
+details summary { cursor: pointer; color: var(--decode); font-weight: 500; font-size: 0.92rem; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "+"; display: inline-block; width: 1em; font-weight: 600; }
+details[open] summary::before { content: "\2212"; }
+details .ans { margin: 8px 0 10px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; font-size: 0.95rem; }
+.recap ol { padding-left: 1.3em; margin: 0 0 14px; }
+.recap li { margin: 4px 0; }
+.next { background: var(--band); border-radius: 14px; padding: 18px; margin: 18px 0 8px; }
+.next b { font-family: var(--display); font-size: 1.15rem; display: block; margin-bottom: 4px; }
+.sources { font-size: 0.82rem; color: var(--muted); padding: 24px 0 48px; }
+.sources ul { padding-left: 1.1em; margin: 6px 0 0; }
+.sources a { color: var(--muted); }
+
+/* Lesson 3 */
+.words { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 14px 16px; margin: 6px 0 0; }
+.words h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.words dl { margin: 0; display: grid; grid-template-columns: 112px 1fr; gap: 6px 12px; font-size: 0.92rem; }
+.words dt { font-weight: 600; }
+.words dd { margin: 0; color: var(--ink); }
+@media (max-width: 400px) { .words dl { grid-template-columns: 1fr; gap: 0; } .words dd { margin-bottom: 8px; } }
+
+.lanes-wrap { margin: 10px 0 4px; }
+.lanes-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 0.86rem; margin-bottom: 4px; }
+.lanes-head b { font-weight: 600; }
+.lanes-head span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.lanes-head span strong { color: var(--ink); }
+.lanes { display: grid; gap: 3px; }
+.lane { display: grid; grid-template-columns: repeat(22, 1fr); gap: 1px; height: 22px; }
+.cell { border-radius: 2px; background: transparent; position: relative; }
+.cell.p { background: var(--prefill); }
+.cell.d { background: var(--decode); }
+.cell.d.alt { background: color-mix(in srgb, var(--decode) 72%, var(--surface)); }
+.cell.idle { background: repeating-linear-gradient(135deg, var(--off) 0 2px, transparent 2px 5px); }
+.cell.hide { visibility: hidden; }
+.cell .rid { position: absolute; left: 2px; top: 50%; transform: translateY(-50%); font-size: 10px; font-weight: 600; color: #fff; white-space: nowrap; z-index: 1; pointer-events: none; }
+.pass-axis { display: grid; grid-template-columns: repeat(22, 1fr); gap: 1px; font-size: 0.7rem; color: var(--muted); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.pass-axis span { text-align: center; }
+.lane-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 10px; }
+.sw.p { background: var(--prefill); } .sw.d { background: var(--decode); }
+.sw.idle { background: repeating-linear-gradient(135deg, var(--off) 0 2px, transparent 2px 4px); box-shadow: inset 0 0 0 1px var(--off); }
+.cursor-note { font-size: 0.86rem; min-height: 1.5em; margin: 8px 0 0; }
+
+.hbars .row { margin: 8px 0; }
+.hbars .lab { display: flex; justify-content: space-between; gap: 8px; font-size: 0.86rem; margin-bottom: 3px; }
+.hbars .lab b { font-variant-numeric: tabular-nums; }
+.track { position: relative; height: 16px; border-radius: 4px; background-image: linear-gradient(to right, var(--rule) 1px, transparent 1px); background-size: 25% 100%; }
+.fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; min-width: 2px; transition: width .3s ease; background: var(--decode); }
+.fill.muted { background: var(--off); }
+.fill.warn { background: transparent; box-shadow: inset 0 0 0 2px var(--bad); background-image: repeating-linear-gradient(135deg, var(--bad-tint) 0 4px, transparent 4px 8px); }
+
+/* Old-style reservation strip */
+.strip { display: flex; height: 30px; border-radius: 6px; overflow: hidden; border: 1px solid var(--rule); }
+.strip .used { background: var(--decode); }
+.strip .resv { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.strip .gap { background: repeating-linear-gradient(135deg, var(--off) 0 3px, transparent 3px 7px); }
+.strip-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 8px; }
+.sw.used { background: var(--decode); } .sw.resv { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.req-rows { display: grid; gap: 10px; margin-bottom: 10px; }
+.req-rows .lab { display: flex; justify-content: space-between; font-size: 0.84rem; margin-bottom: 3px; }
+.req-rows .lab b { font-variant-numeric: tabular-nums; }
+
+/* Block memory */
+.blocks { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.blk { border: 1.5px dashed var(--rule); border-radius: 8px; padding: 5px 5px 6px; min-height: 52px; display: grid; grid-template-rows: auto 1fr; gap: 4px; transition: border-color .2s, background-color .2s; }
+.blk .bh { display: flex; justify-content: space-between; font-size: 0.68rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.blk .bh b { color: var(--ink); font-size: 0.78rem; }
+.blk .slots { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; align-self: end; }
+.blk .slots i { height: 12px; border-radius: 2px; box-shadow: inset 0 0 0 1px var(--rule); }
+.blk.taken { border: 1.5px solid var(--decode); background: var(--surface); }
+.blk.taken .slots i { box-shadow: inset 0 0 0 1px var(--decode); }
+.blk.taken .slots i.f { background: var(--decode); }
+.blk.fresh { background: var(--decode-tint); }
+.tables { display: grid; gap: 6px; margin: 14px 0 6px; }
+.trow { display: grid; grid-template-columns: 96px 1fr; gap: 8px; align-items: center; font-size: 0.86rem; }
+.trow .who { font-weight: 600; }
+.trow .who small { display: block; font-weight: 400; color: var(--muted); font-size: 0.74rem; }
+.trow .map { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.pg { font-family: var(--mono); font-size: 0.78rem; border-radius: 5px; padding: 0 6px; background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.pg .lg { color: var(--muted); }
+.trow.done { opacity: .45; }
+.btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.btns button { font-size: 0.86rem; padding: 6px 13px; }
+.bstats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+
+/* Sharing */
+.share { display: grid; gap: 8px; }
+.share .row { display: grid; grid-template-columns: 74px 1fr; gap: 8px; align-items: center; font-size: 0.84rem; }
+.share .row .bl { display: flex; gap: 4px; flex-wrap: wrap; }
+.sb { font-family: var(--mono); font-size: 0.76rem; border-radius: 5px; padding: 2px 7px; }
+.sb.shared { background: var(--prefill); color: #fff; }
+.sb.own { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.sb .rc { font-weight: 600; }
+
+/* Pool + preemption */
+.pool { display: flex; height: 34px; border-radius: 6px; overflow: hidden; border: 1px solid var(--rule); }
+.pool > div { display: flex; align-items: center; justify-content: center; font-size: 0.74rem; font-weight: 600; color: #fff; border-right: 2px solid var(--surface); }
+.pool .r { background: var(--decode); }
+.pool .paused { background: repeating-linear-gradient(135deg, var(--bad-tint) 0 4px, transparent 4px 8px); color: var(--bad); box-shadow: inset 0 0 0 2px var(--bad); }
+.pool .grow { background: var(--decode); }
+.pool-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 8px; }
+.sw.paused { background: repeating-linear-gradient(135deg, var(--bad-tint) 0 2px, transparent 2px 4px); box-shadow: inset 0 0 0 1.5px var(--bad); }
+
+.seg3 { display: flex; flex-wrap: wrap; gap: 6px; }
+</style>
+</head>
+<body>
+<div class="progress" aria-hidden="true"><span id="prog"></span></div>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="kicker"><span>Inference track, lesson 3 of 8</span><a href="https://claude.ai/artifact/8m8maPTnDHsbPQWnqjz1bA">Back to your prep plan</a></p>
+    <h1 aria-label="How vLLM packs many requests onto one GPU"><span class="t">How</span><span class="t"> vLLM</span><span class="t"> packs</span><span class="t"> many</span><span class="t"> requests</span><span class="t"> onto</span><span class="t"> one</span><span class="t"> GPU</span></h1>
+    <p class="lede">Lesson 1 showed that batching gives more tokens per second. This lesson shows the two ideas that make batching work well in practice: continuous batching and PagedAttention.</p>
+
+    <div class="demo" id="demo">
+      <p class="demo-title">Ten requests, four slots. Same work, two ways to schedule it.</p>
+      <div class="lanes-wrap">
+        <div class="lanes-head"><b>Static batching</b><span>done at pass <strong id="sEnd">22</strong>, slots busy <strong id="sBusy">51%</strong></span></div>
+        <div class="lanes" id="lanesS" role="img" aria-label="Static batching: three batches, finished at pass 22, slots busy 51% of the time"></div>
+      </div>
+      <div class="lanes-wrap">
+        <div class="lanes-head"><b>Continuous batching</b><span>done at pass <strong id="cEnd">15</strong>, slots busy <strong id="cBusy">75%</strong></span></div>
+        <div class="lanes" id="lanesC" role="img" aria-label="Continuous batching: finished at pass 15, slots busy 75% of the time"></div>
+        <div class="pass-axis" id="axis" aria-hidden="true"></div>
+      </div>
+      <div class="lane-legend"><span><i class="sw p"></i>first pass (prefill)</span><span><i class="sw d"></i>decode passes</span><span><i class="sw idle"></i>slot sits empty</span></div>
+      <div class="demo-foot">
+        <p class="status" id="status" aria-live="polite"><b>Done.</b> Each row is one slot in the batch. Each square is one pass. Continuous batching finishes the same ten requests 7 passes sooner.</p>
+        <button class="primary" id="replay" type="button">Play both</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="words" aria-labelledby="wordsH">
+    <h2 id="wordsH">Words used in this lesson</h2>
+    <dl>
+      <dt>Pass</dt><dd>One run of the model. Each request in the batch gets one new token per pass (Lesson 1).</dd>
+      <dt>Batch</dt><dd>The group of requests that share one pass.</dd>
+      <dt>Slot</dt><dd>A place for one request in the batch.</dd>
+      <dt>Scheduler</dt><dd>The part of vLLM that decides which requests go into each pass.</dd>
+      <dt>Block</dt><dd>A small fixed piece of KV cache memory. In vLLM it holds 16 tokens.</dd>
+      <dt>Block table</dt><dd>A request's list of which blocks hold its tokens.</dd>
+      <dt>Preemption</dt><dd>Pausing a running request to free memory, then restarting it later.</dd>
+    </dl>
+  </section>
+
+  <nav class="toc" aria-label="Lesson steps">
+    <h2>In this lesson</h2>
+    <ol>
+      <li><a href="#static">Why simple batches waste time</a></li>
+      <li><a href="#continuous">Continuous batching</a></li>
+      <li><a href="#reserve">Why memory was wasted</a></li>
+      <li><a href="#paged">PagedAttention</a></li>
+      <li><a href="#sharing">Sharing blocks</a></li>
+      <li><a href="#preempt">When memory runs out</a></li>
+      <li><a href="#knobs">The two scheduler settings</a></li>
+      <li><a href="#quiz">Check yourself</a></li>
+    </ol>
+  </nav>
+
+  <!-- 1 -->
+  <section class="step" id="static">
+    <div class="step-head"><span class="num">1</span><h2>Why simple batches waste time</h2></div>
+    <p>The simple way to batch is <strong>static batching</strong>. You take a group of requests, run them together, and wait until all of them finish. Then you start the next group.</p>
+    <p>The problem is that replies have different lengths. One request may need 2 tokens, another 9. In the top row of the demo above, the short requests finish early, but their slots stay empty until the longest one is done. New requests have to wait outside.</p>
+    <p>The GPU still reads all the weights on every pass, even when some slots are empty. So empty slots are wasted work.</p>
+    <p class="key"><span>Key idea</span>In static batching, the whole batch waits for its longest reply. The more reply lengths differ, the more slots sit empty.</p>
+  </section>
+
+  <!-- 2 -->
+  <section class="step" id="continuous">
+    <div class="step-head"><span class="num">2</span><h2>Continuous batching</h2></div>
+    <p><strong>Continuous batching</strong> makes a new decision on every pass. When a request finishes, it leaves at once, and a waiting request takes its slot on the next pass. Nobody waits for the slowest request.</p>
+    <p>The idea first appeared in a 2022 research system called Orca, under the name <em>iteration-level scheduling</em>. vLLM, Hugging Face TGI, TensorRT-LLM and SGLang all use it now.</p>
+    <h3>What vLLM's scheduler does on every pass</h3>
+    <ol class="seq">
+      <li><span>Remove requests that just finished, and free their memory.</span></li>
+      <li><span>Keep every running request in the batch, so each gets its next token.</span></li>
+      <li><span>Use the space that is left to start waiting requests. Long prompts can be split across passes (Lesson 4).</span></li>
+      <li><span>Run one pass of the model for the whole batch.</span></li>
+    </ol>
+    <figure class="fig">
+      <p class="fig-title">Try it: 32 requests</p>
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="vLab">How much reply lengths differ</span><div class="seg" id="vSeg" role="group" aria-labelledby="vLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="kLab">Slots in the batch</span><div class="seg" id="kSeg" role="group" aria-labelledby="kLab"></div></div>
+      </div>
+      <div class="hbars" id="simBars"></div>
+      <div class="readouts" aria-live="polite">
+        <div class="ro"><b id="rS">39%</b><span>slots busy, static</span></div>
+        <div class="ro"><b id="rC">77%</b><span>slots busy, continuous</span></div>
+        <div class="ro"><b id="rX">2.0×</b><span>faster to finish all 32</span></div>
+      </div>
+      <figcaption id="simCap">A toy model: every request uses one slot for as many passes as its reply has tokens. Reply lengths are fixed sample numbers, so you get the same result each time.</figcaption>
+    </figure>
+    <p>When every reply has the same length, both methods tie. The gain comes from the variety in real traffic. Anyscale tested this on an A100 40GB serving the OPT-13B model. Continuous batching plus vLLM's memory handling gave up to 23 times the throughput of simple static batching.</p>
+    <p class="key"><span>Key idea</span>Continuous batching picks the batch again on every pass. Finished requests leave at once, and waiting ones join at once.</p>
+  </section>
+
+  <!-- 3 -->
+  <section class="step" id="reserve">
+    <div class="step-head"><span class="num">3</span><h2>Why memory was wasted</h2></div>
+    <p>Continuous batching needs memory for every running request's KV cache (Lesson 2). Before vLLM, servers handled that memory badly.</p>
+    <p>When a request started, the server did not know how long the reply would be. So it reserved one unbroken piece of memory big enough for the <em>longest possible</em> reply. Most of that space was never used.</p>
+    <figure class="fig">
+      <p class="fig-title">Three requests, each reserving room for 2,048 tokens</p>
+      <div class="req-rows" id="resRows"></div>
+      <div class="strip" id="resStrip" role="img" aria-label="Memory strip: most of the reserved space is unused"></div>
+      <div class="strip-legend"><span><i class="sw used"></i>holds real tokens</span><span><i class="sw resv"></i>reserved, never used</span><span><i class="sw idle"></i>free, but in pieces too small to use</span></div>
+      <figcaption id="resCap">Only 22% of this memory holds real tokens. Example numbers for illustration.</figcaption>
+    </figure>
+    <p>There were two kinds of waste. Space reserved but never filled. And small gaps between reservations that were too small for a new request. The vLLM team measured that existing systems wasted 60% to 80% of their KV cache memory this way.</p>
+    <p class="key"><span>Key idea</span>Reserving for the worst case wastes most of the memory. Less free memory means fewer requests in the batch.</p>
+  </section>
+
+  <!-- 4 -->
+  <section class="step" id="paged">
+    <div class="step-head"><span class="num">4</span><h2>PagedAttention: memory in small blocks</h2></div>
+    <p>vLLM fixes this with <strong>PagedAttention</strong>. It borrows an old idea from operating systems: virtual memory with pages.</p>
+    <ul>
+      <li>The KV cache pool is cut into small, equal <strong>blocks</strong>. By default, each vLLM block holds 16 tokens.</li>
+      <li>A request gets a new block only when its last block is full.</li>
+      <li>The blocks can be anywhere in memory. They do not need to sit next to each other.</li>
+      <li>Each request has a <strong>block table</strong>: a list that says which blocks hold its tokens, in order.</li>
+    </ul>
+    <figure class="fig">
+      <p class="fig-title">Try it: GPU memory with 20 blocks of 4 tokens each</p>
+      <div class="blocks" id="blocks" role="img" aria-label="GPU memory blocks"></div>
+      <div class="tables" id="tables"></div>
+      <div class="bstats">
+        <div class="ro"><b id="bTok">18</b><span>tokens stored</span></div>
+        <div class="ro"><b id="bUsed">6</b><span>blocks in use</span></div>
+        <div class="ro"><b id="bWaste">6</b><span>empty token slots, all in last blocks</span></div>
+      </div>
+      <div class="btns">
+        <button type="button" id="bStep">Add one token to each request</button>
+        <button type="button" id="bFinish">Finish request B</button>
+        <button type="button" id="bNew">Start request D</button>
+        <button type="button" id="bReset">Reset</button>
+      </div>
+      <p class="cursor-note" id="bNote" aria-live="polite">Requests A, B and C are running. Their blocks are mixed together in memory, and that is fine.</p>
+      <figcaption>4 tokens per block keeps the picture small; vLLM uses 16 by default. In the block table, "A1→3" means request A's second block is stored in memory block #3 (counting starts at 0).</figcaption>
+    </figure>
+    <p>The only empty space is inside each request's last block. The vLLM team reported that this cuts waste to under 4%. More free memory means more requests fit in the batch, and that is where the speed comes from. In the vLLM paper, this gave 2 to 4 times the throughput of earlier systems such as FasterTransformer and Orca, at the same latency.</p>
+    <p>One cost: the attention code must look up the block table to find each token's keys and values. vLLM wrote special GPU code for this, which is where the name <em>PagedAttention</em> comes from.</p>
+    <p class="key"><span>Key idea</span>Blocks are given out as tokens arrive, from anywhere in memory. Waste is less than one block per request.</p>
+  </section>
+
+  <!-- 5 -->
+  <section class="step" id="sharing">
+    <div class="step-head"><span class="num">5</span><h2>Sharing blocks</h2></div>
+    <p>Block tables have a second benefit. Two requests can point to the <em>same</em> block. vLLM counts how many requests use each block.</p>
+    <p>Example: you ask for 3 different replies to one prompt (sampling with <code>n=3</code>). The prompt's blocks are stored once and shared. Each reply gets its own blocks only for the new tokens.</p>
+    <figure class="fig">
+      <p class="fig-title">One prompt, three replies</p>
+      <div class="share">
+        <div class="row"><span>Reply 1</span><div class="bl"><span class="sb shared">P1</span><span class="sb shared">P2</span><span class="sb shared">P3</span><span class="sb own">R1</span></div></div>
+        <div class="row"><span>Reply 2</span><div class="bl"><span class="sb shared">P1</span><span class="sb shared">P2</span><span class="sb shared">P3</span><span class="sb own">R2</span></div></div>
+        <div class="row"><span>Reply 3</span><div class="bl"><span class="sb shared">P1</span><span class="sb shared">P2</span><span class="sb shared">P3</span><span class="sb own">R3</span></div></div>
+        <div class="row"><span>In memory</span><div class="bl"><span class="sb shared">P1 <span class="rc">×3</span></span><span class="sb shared">P2 <span class="rc">×3</span></span><span class="sb shared">P3 <span class="rc">×3</span></span><span class="sb own">R1</span><span class="sb own">R2</span><span class="sb own">R3</span></div></div>
+      </div>
+      <figcaption>6 blocks in memory instead of 12. "×3" means three replies use that block.</figcaption>
+    </figure>
+    <p>If one reply needs to write into a shared block, vLLM first copies that block, so the others keep theirs unchanged. This is called <strong>copy-on-write</strong>. Beam search keeps several candidate replies and picks the best one. For sampling and beam search, the vLLM team reported up to 55% less memory and up to 2.2 times the throughput.</p>
+    <p>The same idea lets many requests share a common start, like one system prompt. That is <strong>prefix caching</strong>, in Lesson 4.</p>
+    <p class="key"><span>Key idea</span>A block can belong to many requests. Shared text is stored once.</p>
+  </section>
+
+  <!-- 6 -->
+  <section class="step" id="preempt">
+    <div class="step-head"><span class="num">6</span><h2>When memory runs out</h2></div>
+    <p>vLLM lets a request in based on the memory it needs <em>now</em>, not at its longest. This packs in many more requests. The risk: running requests keep growing, and the pool can fill up in the middle of their replies.</p>
+    <p>When there is no free block for a running request's next token, vLLM <strong>preempts</strong>. It pauses one or more running requests and frees their blocks. Later, when memory is free again, it starts those requests over and computes their KV cache again. In vLLM V1, recomputing is the default way to do this.</p>
+    <figure class="fig">
+      <p class="fig-title">The pool is full and request E needs one more block</p>
+      <div class="pool" role="img" aria-label="KV pool full: request E needs a block, so request F is paused and its blocks are freed">
+        <div class="r" style="flex:3">A</div><div class="r" style="flex:2">B</div><div class="r" style="flex:4">C</div><div class="r" style="flex:2">D</div><div class="grow" style="flex:3">E</div><div class="paused" style="flex:2">F</div>
+      </div>
+      <div class="pool-legend"><span><i class="sw d"></i>running requests</span><span><i class="sw paused"></i>F is paused, and its blocks go to E</span></div>
+      <div class="log"><span class="i">WARNING</span> ... preempted by PreemptionMode.RECOMPUTE mode
+because there is not enough KV cache space.</div>
+      <figcaption>Log text from the vLLM docs, shortened. Newer versions also print a running count, <code>total_cumulative_preemption_cnt</code>.</figcaption>
+    </figure>
+    <p>A few preemptions are fine. Many of them slow everything down, because paused requests redo their work. The vLLM docs suggest these fixes:</p>
+    <ul>
+      <li>Raise <code>--gpu-memory-utilization</code>, so the pool is bigger.</li>
+      <li>Lower <code>--max-num-seqs</code> or <code>--max-num-batched-tokens</code>, so fewer requests run at once.</li>
+      <li>Raise <code>--tensor-parallel-size</code>, so the weights are split across GPUs and more memory is left for the cache.</li>
+    </ul>
+    <p class="key"><span>Key idea</span>Paging lets vLLM pack requests tightly. If they all grow at once, it pauses some and redoes them later.</p>
+  </section>
+
+  <!-- 7 -->
+  <section class="step" id="knobs">
+    <div class="step-head"><span class="num">7</span><h2>The two scheduler settings</h2></div>
+    <p>Two flags set limits for each pass:</p>
+    <ul>
+      <li><code>--max-num-seqs</code>: the most requests in one pass.</li>
+      <li><code>--max-num-batched-tokens</code>: the most tokens in one pass. This mostly limits how much prompt work fits in a pass (Lesson 4).</li>
+    </ul>
+    <p>Their defaults depend on your vLLM version and setup, so read them from your startup log or <code>vllm serve --help</code>.</p>
+    <p>How many requests actually run at once? It is the smaller of two numbers: <code>--max-num-seqs</code>, and how many requests fit in the KV pool.</p>
+    <figure class="fig">
+      <p class="fig-title">Try it: how many requests run at once?</p>
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="poolLab">KV pool (from Lesson 2)</span><div class="seg" id="poolSeg" role="group" aria-labelledby="poolLab"></div></div>
+        <div class="ctl"><label for="avgIn">Average tokens per request, prompt plus reply: <output id="avgOut">1,500</output></label><input type="range" id="avgIn" min="250" max="8000" step="250" value="1500"></div>
+        <div class="ctl"><span class="ctl-name" id="seqLab"><code>--max-num-seqs</code></span><div class="seg" id="seqSeg" role="group" aria-labelledby="seqLab"></div></div>
+      </div>
+      <div class="hbars" id="concBars"></div>
+      <p class="fitmsg" id="concMsg" style="font-size:.9rem;background:var(--paper);border-radius:10px;padding:8px 12px;margin:10px 0 0"></p>
+      <figcaption>"Old way" = every request reserves room for 8,192 tokens, like the servers in step 3. Averages hide growth: if you are close to the memory limit, expect some preemption.</figcaption>
+    </figure>
+    <p class="key"><span>Key idea</span>Requests running at once = the smaller of <code>--max-num-seqs</code> and (KV pool ÷ tokens per request).</p>
+  </section>
+
+  <!-- Quiz -->
+  <section class="step" id="quiz">
+    <div class="step-head plain"><h2>Check yourself</h2></div>
+    <p>Answer each one first, out loud or in chat, then open the answer.</p>
+    <div class="q"><p><span class="qn">1</span>A static batch has three replies of 50, 60 and 400 tokens. After how many passes can the slot of the 50-token reply take a new request? And with continuous batching?</p>
+      <details><summary>Show answer</summary><div class="ans">Static: after 400 passes, when the whole batch is done. Continuous: right after pass 50. A waiting request joins on the next pass.</div></details></div>
+    <div class="q"><p><span class="qn">2</span>Why does continuous batching help very little when every reply has the same length?</p>
+      <details><summary>Show answer</summary><div class="ans">All requests finish on the same pass, so no slot is ever left empty. The gain comes from replies of different lengths.</div></details></div>
+    <div class="q"><p><span class="qn">3</span>vLLM uses blocks of 16 tokens. A request holds 1,000 tokens. How many blocks does it use, and how many token slots are empty?</p>
+      <details><summary>Show answer</summary><div class="ans">1,000 ÷ 16 = 62.5, so 63 blocks. They hold 63 × 16 = 1,008 tokens, so 8 slots are empty, all in the last block.</div></details></div>
+    <div class="q"><p><span class="qn">4</span>Your attacker server's log shows many preemption warnings. Name two fixes.</p>
+      <details><summary>Show answer</summary><div class="ans">Lower <code>--max-num-seqs</code> (or <code>--max-num-batched-tokens</code>) so fewer requests run at once. Or make the pool bigger: raise <code>--gpu-memory-utilization</code> if your GPU share allows it, or split the model across GPUs with <code>--tensor-parallel-size</code>. Lesson 2's fixes also help, such as FP8 KV cache.</div></details></div>
+    <div class="q"><p><span class="qn">5</span>An A100 80GB has a KV pool of 411,529 tokens. Requests average 1,500 tokens. <code>--max-num-seqs</code> is 256. How many requests run at once? How many would run if each reserved 8,192 tokens?</p>
+      <details><summary>Show answer</summary><div class="ans">The pool fits 411,529 ÷ 1,500 = 274 requests, but <code>--max-num-seqs</code> caps it at 256. If each reserved 8,192 tokens: 411,529 ÷ 8,192 = 50 requests. Paging runs about 5 times as many.</div></details></div>
+  </section>
+
+  <section class="step recap" id="next">
+    <div class="step-head plain"><h2>What to remember</h2></div>
+    <ol>
+      <li>Static batching waits for the longest reply, so slots sit empty.</li>
+      <li>Continuous batching picks the batch again on every pass. Finished requests leave and waiting ones join at once.</li>
+      <li>Old servers reserved memory for the longest possible reply and wasted 60% to 80% of it.</li>
+      <li>PagedAttention gives out 16-token blocks as needed, from anywhere in memory, tracked by a block table. Waste drops under 4%.</li>
+      <li>When the pool fills up, vLLM preempts: it pauses requests and recomputes them later. Watch for it in your logs.</li>
+    </ol>
+    <div class="next"><b>Next: Lesson 4, prefix caching and chunked prefill</b>How a shared system prompt is stored once and reused. And how long prompts are split so they don't hold up everyone else's tokens.</div>
+    <p style="margin-top:14px"><a href="https://claude.ai/artifact/7jBvi95ykBeCHw6HDrrRrP">Back to Lesson 2</a></p>
+  </section>
+
+  <footer class="sources">
+    Sources
+    <ul>
+      <li><a href="https://huggingface.co/papers/2309.06180">Kwon et al., PagedAttention paper (SOSP 2023)</a>: near-zero waste, sharing, 2 to 4 times the throughput of FasterTransformer and Orca</li>
+      <li><a href="https://vllm.ai/blog/2023-06-20-vllm">vLLM launch blog (2023)</a>: 60% to 80% waste in existing systems, under 4% with paging, block tables, copy-on-write, up to 55% less memory and 2.2 times the throughput for sampling</li>
+      <li><a href="https://anyscale.com/blog/continuous-batching-llm-inference">Anyscale: continuous batching</a>: static batching's problem, Orca as the first system, up to 23 times the throughput on OPT-13B and an A100 40GB</li>
+      <li><a href="https://docs.vllm.ai/en/v0.9.0/configuration/optimization.html">vLLM docs: optimization and tuning</a>: preemption, RECOMPUTE as the V1 default, and the fixes</li>
+      <li><a href="https://docs.vllm.ai/en/v0.20.0/configuration/optimization/">vLLM docs, later version</a>: preemption warning text, decode-first scheduling with chunked prefill</li>
+      <li><a href="https://www.premai.io/blog/llm-batching-static-vs-continuous-and-why-it-matters-for-throughput/">PremAI: static vs continuous batching</a>: which engines use continuous batching</li>
+      <li><a href="https://vllm.readthedocs.io/en/latest/models/engine_args.html">vLLM engine arguments</a>: what <code>--max-num-seqs</code> and <code>--max-num-batched-tokens</code> limit, 16-token default block size</li>
+    </ul>
+  </footer>
+</main>
+
+<script>
+(function () {
+  const $ = (s) => document.querySelector(s);
+  const fmt = (n, d = 0) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const prog = $('#prog');
+  const onScroll = () => { const h = document.documentElement; const max = h.scrollHeight - h.clientHeight; prog.style.width = (max > 0 ? h.scrollTop / max * 100 : 0) + '%'; };
+  window.addEventListener('scroll', onScroll, { passive: true }); onScroll();
+
+  /* Scheduling simulation shared by the hero and step 2 */
+  function schedule(lengths, slots, mode) {
+    const segs = []; // {slot, id, start, len}
+    if (mode === 'static') {
+      let t = 0;
+      for (let i = 0; i < lengths.length; i += slots) {
+        const group = lengths.slice(i, i + slots);
+        group.forEach((len, j) => segs.push({ slot: j, id: i + j, start: t, len }));
+        t += Math.max(...group);
+      }
+      return { segs, end: t };
+    }
+    const free = new Array(slots).fill(0);
+    lengths.forEach((len, id) => {
+      let s = 0; for (let k = 1; k < slots; k++) if (free[k] < free[s]) s = k;
+      segs.push({ slot: s, id, start: free[s], len });
+      free[s] += len;
+    });
+    return { segs, end: Math.max(...free) };
+  }
+  const busy = (lengths, slots, end) => lengths.reduce((a, b) => a + b, 0) / (slots * end);
+
+  /* Hero */
+  const HL = [3, 9, 4, 2, 6, 3, 5, 2, 7, 4];
+  const COLS = 22, SLOTS = 4;
+  const S = schedule(HL, SLOTS, 'static'), C = schedule(HL, SLOTS, 'continuous');
+  function buildLanes(host, sched) {
+    host.innerHTML = '';
+    const grid = [];
+    for (let s = 0; s < SLOTS; s++) {
+      const lane = el('div', 'lane'); const row = [];
+      for (let c = 0; c < COLS; c++) { const cell = el('div', 'cell'); lane.appendChild(cell); row.push(cell); }
+      host.appendChild(lane); grid.push(row);
+    }
+    const cls = Array.from({ length: SLOTS }, () => new Array(COLS).fill(''));
+    sched.segs.forEach((g, k) => {
+      for (let p = 0; p < g.len; p++) {
+        const c = g.start + p; if (c >= COLS) continue;
+        cls[g.slot][c] = p === 0 ? 'p' : ('d' + (g.id % 2 ? ' alt' : ''));
+      }
+      const first = grid[g.slot][g.start];
+      if (first) { const r = el('span', 'rid', 'R' + (g.id + 1)); first.appendChild(r); }
+    });
+    for (let s = 0; s < SLOTS; s++) for (let c = 0; c < COLS; c++) {
+      if (!cls[s][c]) cls[s][c] = c < sched.end ? 'idle' : 'none';
+    }
+    return { grid, cls };
+  }
+  const LS = buildLanes($('#lanesS'), S), LC = buildLanes($('#lanesC'), C);
+  const axis = $('#axis');
+  for (let c = 0; c < COLS; c++) axis.appendChild(el('span', null, (c + 1) % 5 === 0 || c === 0 ? String(c + 1) : ''));
+  function paint(L, upto) {
+    for (let s = 0; s < SLOTS; s++) for (let c = 0; c < COLS; c++) {
+      const k = L.cls[s][c];
+      L.grid[s][c].className = 'cell' + (k === 'none' ? '' : ' ' + k) + (c >= upto ? ' hide' : '');
+    }
+  }
+  $('#sEnd').textContent = S.end; $('#cEnd').textContent = C.end;
+  $('#sBusy').textContent = Math.round(busy(HL, SLOTS, S.end) * 100) + '%';
+  $('#cBusy').textContent = Math.round(busy(HL, SLOTS, C.end) * 100) + '%';
+  paint(LS, COLS); paint(LC, COLS);
+  let timers = [];
+  const btn = $('#replay'), statusEl = $('#status');
+  btn.addEventListener('click', () => {
+    timers.forEach(clearTimeout); timers = []; btn.disabled = true;
+    paint(LS, 0); paint(LC, 0);
+    for (let t = 1; t <= COLS; t++) {
+      timers.push(setTimeout(() => {
+        paint(LS, t); paint(LC, t);
+        if (t === C.end) statusEl.innerHTML = '<b>Pass ' + t + '.</b> Continuous batching is done. Static batching still has passes to go, with slots sitting empty.';
+        else if (t < C.end) statusEl.innerHTML = '<b>Pass ' + t + '.</b> In the bottom row, a freed slot takes the next request on the very next pass.';
+        else if (t === S.end) { statusEl.innerHTML = '<b>Done.</b> Each row is one slot. Each square is one pass. Continuous batching finishes the same ten requests ' + (S.end - C.end) + ' passes sooner.'; btn.disabled = false; }
+      }, 250 + t * 260));
+    }
+  });
+
+  /* Step 2 simulator */
+  function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  const N = 32;
+  const VAR = [
+    { name: 'Not at all', gen: () => new Array(N).fill(8) },
+    { name: 'Somewhat', gen: () => { const r = rng(7); return Array.from({ length: N }, () => 4 + Math.floor(r() * 9)); } },
+    { name: 'A lot', gen: () => { const r = rng(11); return Array.from({ length: N }, () => (r() < 0.2 ? 25 + Math.floor(r() * 16) : 1 + Math.floor(r() * 8))); } }
+  ];
+  const KS = [4, 8, 16];
+  const ss = { v: 2, k: 0 };
+  function seg(host, items, obj, key, cb, label) {
+    const btns = items.map((it, i) => {
+      const b = el('button', null, label ? label(it) : it.name); b.type = 'button';
+      b.setAttribute('aria-pressed', String(i === obj[key]));
+      b.addEventListener('click', () => { obj[key] = i; btns.forEach((x, j) => x.setAttribute('aria-pressed', String(j === i))); cb(); });
+      host.appendChild(b); return b;
+    });
+  }
+  seg($('#vSeg'), VAR, ss, 'v', renderSim);
+  seg($('#kSeg'), KS, ss, 'k', renderSim, (k) => String(k));
+  function bars(host, rows, scale, unit) {
+    host.innerHTML = '';
+    rows.forEach((r) => {
+      const row = el('div', 'row');
+      const lab = el('div', 'lab'); lab.appendChild(el('span', null, r.name)); lab.appendChild(el('b', null, fmt(r.v) + (unit || '')));
+      const tr = el('div', 'track'); const f = el('div', 'fill' + (r.cls ? ' ' + r.cls : '')); f.style.width = (Math.min(1, r.v / scale) * 100) + '%';
+      tr.appendChild(f); row.appendChild(lab); row.appendChild(tr); host.appendChild(row);
+    });
+  }
+  function renderSim() {
+    const L = VAR[ss.v].gen(), k = KS[ss.k];
+    const s = schedule(L, k, 'static'), c = schedule(L, k, 'continuous');
+    bars($('#simBars'), [
+      { name: 'Static: passes to finish all 32', v: s.end, cls: 'muted' },
+      { name: 'Continuous: passes to finish all 32', v: c.end }
+    ], Math.max(s.end, c.end), '');
+    $('#rS').textContent = Math.round(busy(L, k, s.end) * 100) + '%';
+    $('#rC').textContent = Math.round(busy(L, k, c.end) * 100) + '%';
+    $('#rX').textContent = fmt(s.end / c.end, 1) + '×';
+  }
+  renderSim();
+
+  /* Step 3 reservation strip */
+  const RES = [{ n: 'Request 1', used: 300 }, { n: 'Request 2', used: 1100 }, { n: 'Request 3', used: 150 }];
+  const MAX = 2048;
+  const resRows = $('#resRows');
+  bars(resRows, RES.map((r) => ({ name: r.n + ': tokens it really holds, of 2,048 reserved', v: r.used })), MAX, '');
+  const strip = $('#resStrip');
+  const GAP = 300; // gap after each reservation, in token-sized units
+  const total = RES.length * (MAX + GAP);
+  RES.forEach((r) => {
+    const u = el('div', 'used'); u.style.flex = r.used; strip.appendChild(u);
+    const v = el('div', 'resv'); v.style.flex = MAX - r.used; strip.appendChild(v);
+    const g = el('div', 'gap'); g.style.flex = GAP; strip.appendChild(g);
+  });
+  const usedSum = RES.reduce((a, r) => a + r.used, 0);
+  $('#resCap').textContent = 'Only ' + Math.round(usedSum / total * 100) + '% of this memory holds real tokens. Example numbers for illustration.';
+
+  /* Step 4 block memory */
+  const NB = 20, BS = 4;
+  let mem, reqs, freeList, order;
+  function reset() {
+    mem = Array.from({ length: NB }, () => ({ owner: null, fill: 0, fresh: false }));
+    freeList = Array.from({ length: NB }, (_, i) => i);
+    reqs = {};
+    order = [];
+    addReq('A', 0); addReq('B', 0); addReq('C', 0);
+    // interleaved growth so blocks end up mixed: A 6 tokens, B 3, C 9
+    const plan = [['A', 4], ['B', 3], ['C', 4], ['A', 2], ['C', 4], ['C', 1]];
+    plan.forEach(([id, n]) => { for (let i = 0; i < n; i++) addToken(id); });
+    mem.forEach((b) => (b.fresh = false));
+    note('Requests A, B and C are running. Their blocks are mixed together in memory, and that is fine.');
+    draw();
+  }
+  function addReq(id, n) { reqs[id] = { table: [], tokens: 0, done: false }; order.push(id); for (let i = 0; i < n; i++) addToken(id); }
+  function addToken(id) {
+    const r = reqs[id];
+    if (r.tokens % BS === 0) {
+      if (!freeList.length) return false;
+      const b = freeList.shift(); r.table.push(b); mem[b].owner = id; mem[b].fill = 0; mem[b].fresh = true;
+    }
+    const last = r.table[r.table.length - 1];
+    mem[last].fill++; r.tokens++;
+    return true;
+  }
+  function draw() {
+    const host = $('#blocks'); host.innerHTML = '';
+    mem.forEach((b, i) => {
+      const d = el('div', 'blk' + (b.owner ? ' taken' : '') + (b.fresh ? ' fresh' : ''));
+      const h = el('div', 'bh'); h.appendChild(el('span', null, '#' + i)); h.appendChild(el('b', null, b.owner || ''));
+      const s = el('div', 'slots'); for (let k = 0; k < BS; k++) s.appendChild(el('i', b.owner && k < b.fill ? 'f' : null));
+      d.appendChild(h); d.appendChild(s); host.appendChild(d);
+    });
+    const t = $('#tables'); t.innerHTML = '';
+    let tokens = 0, used = 0;
+    order.forEach((id) => {
+      const r = reqs[id];
+      const row = el('div', 'trow' + (r.done ? ' done' : ''));
+      const who = el('span', 'who', 'Request ' + id); who.appendChild(el('small', null, r.done ? 'finished, blocks freed' : r.tokens + ' tokens'));
+      const map = el('div', 'map');
+      if (r.done) map.appendChild(el('span', 'note', 'no blocks'));
+      else r.table.forEach((b, j) => { const p = el('span', 'pg'); p.innerHTML = '<span class="lg">' + id + j + '→</span>' + b; map.appendChild(p); });
+      row.appendChild(who); row.appendChild(map); t.appendChild(row);
+      if (!r.done) { tokens += r.tokens; used += r.table.length; }
+    });
+    $('#bTok').textContent = tokens; $('#bUsed').textContent = used; $('#bWaste').textContent = used * BS - tokens;
+    $('#bFinish').disabled = !reqs.B || reqs.B.done;
+    $('#bNew').disabled = !!reqs.D;
+  }
+  function note(t) { $('#bNote').textContent = t; }
+  $('#bStep').addEventListener('click', () => {
+    mem.forEach((b) => (b.fresh = false));
+    let newBlocks = [], blocked = [];
+    order.forEach((id) => {
+      const r = reqs[id]; if (r.done) return;
+      const before = r.table.length;
+      if (!addToken(id)) blocked.push(id); else if (r.table.length > before) newBlocks.push(id + ' got block ' + r.table[r.table.length - 1]);
+    });
+    if (blocked.length) note('No free block for ' + blocked.join(', ') + '. In vLLM this is when preemption happens (step 6).');
+    else note(newBlocks.length ? 'New blocks only where the last block was full: ' + newBlocks.join(', ') + '.' : 'Every new token fit into a request’s last block. No new blocks needed.');
+    draw();
+  });
+  $('#bFinish').addEventListener('click', () => {
+    const r = reqs.B; mem.forEach((b) => (b.fresh = false));
+    const freed = r.table.slice();
+    freed.slice().reverse().forEach((b) => { mem[b].owner = null; mem[b].fill = 0; freeList.unshift(b); });
+    r.done = true; r.table = [];
+    note('B finished. Block ' + freed.join(', ') + ' went back to the free list, even though it sits between other requests’ blocks.');
+    draw();
+  });
+  $('#bNew').addEventListener('click', () => {
+    mem.forEach((b) => (b.fresh = false));
+    addReq('D', 0); for (let i = 0; i < 7; i++) addToken('D');
+    note('D has a 7-token prompt, so it needs 2 blocks. It got ' + reqs.D.table.join(' and ') + '. They don’t need to be next to each other.');
+    draw();
+  });
+  $('#bReset').addEventListener('click', reset);
+  reset();
+
+  /* Step 7 concurrency */
+  const POOLS = [{ name: 'A100 80GB defaults: 411,529 tokens', v: 411529 }, { name: 'Your attacker model (assumed): 45,318 tokens', v: 45318 }];
+  const SEQS = [64, 128, 256, 512, 1024];
+  const cs = { p: 0, s: 2 };
+  seg($('#poolSeg'), POOLS, cs, 'p', renderConc);
+  seg($('#seqSeg'), SEQS, cs, 's', renderConc, (v) => String(v));
+  const avgIn = $('#avgIn');
+  avgIn.addEventListener('input', renderConc);
+  function renderConc() {
+    const pool = POOLS[cs.p].v, avg = +avgIn.value, cap = SEQS[cs.s];
+    $('#avgOut').textContent = fmt(avg);
+    const fitKV = Math.floor(pool / avg), run = Math.min(cap, fitKV), old = Math.floor(pool / 8192);
+    const scale = Math.max(cap, fitKV, old, 1);
+    bars($('#concBars'), [
+      { name: 'Fit in the KV pool', v: fitKV, cls: fitKV < cap ? '' : 'muted' },
+      { name: '--max-num-seqs limit', v: cap, cls: cap <= fitKV ? '' : 'muted' },
+      { name: 'Old way: 8,192 reserved each', v: old, cls: 'muted' }
+    ], scale, '');
+    const limit = cap <= fitKV ? '<code>--max-num-seqs</code> is the limit.' : 'Memory is the limit: the KV pool fills before <code>--max-num-seqs</code> is reached.';
+    $('#concMsg').innerHTML = '<b>' + fmt(run) + ' requests run at once.</b> ' + limit + (old > 0 ? ' That is ' + fmt(run / old, 1) + ' times the old way.' : '');
+  }
+  renderConc();
+})();
+</script>
+</body>
+</html>
