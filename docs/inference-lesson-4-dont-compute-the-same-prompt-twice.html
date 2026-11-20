@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Don't Compute the Same Prompt Twice</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+
+:root {
+  /* Layout: same system as Lesson 1. One reading column (max 680px); each step = numbered heading, prose, one framed figure, one key idea.
+     Colour carries meaning: violet = model weights, teal = KV cache (decode memory), grey = overhead, hatched = held back. Amber stays prefill. */
+  --paper: #F4F6F9;
+  --band: #E8ECF2;
+  --surface: #FFFFFF;
+  --ink: #172036;
+  --muted: #586178;
+  --rule: #DCE1EA;
+  --prefill: #C27C0E;
+  --decode: #0088A3;
+  --decode-tint: #DBEEF2;
+  --weights: #7B5BD6;
+  --weights-tint: #EAE4FA;
+  --over: #A3ABB9;
+  --off: #B9C0CC;
+  --tok-a: #E3E8F0;
+  --tok-b: #D3DBE7;
+  --bad: #B42318;
+  --bad-tint: #FCE9E7;
+  --good: #1F7A4A;
+  --good-tint: #E3F3EA;
+  --display: 'Bricolage Grotesque', 'Avenir Next', system-ui, sans-serif;
+  --body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+    --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+    --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+    --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+  --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+  --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+  --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition: none !important; animation: none !important; } }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--body); font-size: 17px; line-height: 1.6; -webkit-text-size-adjust: 100%; }
+a { color: var(--decode); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--decode); outline-offset: 2px; border-radius: 4px; }
+.progress { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 10; }
+.progress span { display: block; height: 100%; width: 0; background: var(--decode); }
+.wrap { max-width: 680px; margin: 0 auto; padding: 0 20px; }
+
+/* Hero */
+.hero { background: var(--band); padding: 40px 0 32px; border-bottom: 1px solid var(--rule); }
+.kicker { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; }
+.kicker a { color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 800; font-size: clamp(2.2rem, 9vw, 3.4rem); line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 14px; text-wrap: balance; }
+h1 .t { border-radius: 6px; padding: 0 0.06em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+h1 .t:nth-child(odd) { background: var(--tok-a); }
+h1 .t:nth-child(even) { background: var(--tok-b); }
+.lede { font-size: 1.08rem; margin: 0 0 22px; max-width: 34em; }
+
+.demo { background: var(--surface); border: 1.5px solid var(--ink); border-radius: 16px; padding: 18px 16px 16px; }
+.demo-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 10px; }
+
+/* Memory bar */
+.mem { display: flex; height: 44px; border-radius: 8px; overflow: hidden; border: 1px solid var(--rule); background: var(--surface); }
+.mem > div { position: relative; min-width: 0; display: flex; align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 600; white-space: nowrap; overflow: hidden; transition: flex-basis .3s ease; }
+.mem .w { background: var(--weights); color: #fff; }
+.mem .o { background: var(--over); }
+.mem .k { background: var(--decode-tint); color: var(--ink); justify-content: flex-start; }
+.mem .k .kfill { position: absolute; inset: 0 auto 0 0; width: 100%; background: var(--decode); transition: width .25s linear; }
+.mem .k span { position: relative; padding-left: 8px; color: #fff; text-shadow: 0 0 2px rgba(0,0,0,.25); }
+.mem .h { background: repeating-linear-gradient(135deg, var(--off) 0 3px, transparent 3px 7px); color: var(--muted); }
+.mem-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 8px; }
+.mem-legend b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+.sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+.sw.w { background: var(--weights); } .sw.o { background: var(--over); } .sw.k { background: var(--decode); }
+.sw.h { background: repeating-linear-gradient(135deg, var(--off) 0 2px, transparent 2px 4px); box-shadow: inset 0 0 0 1px var(--off); }
+.sw.kv { background: var(--decode); } .sw.vv { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+
+.users { display: grid; grid-template-columns: repeat(auto-fill, minmax(13px, 1fr)); gap: 4px; margin: 14px 0 6px; }
+.u { aspect-ratio: 1; border-radius: 50%; border: 1.5px solid var(--rule); background: transparent; transition: background-color .15s, border-color .15s; }
+.u.on { background: var(--decode); border-color: var(--decode); }
+.u.wait { border: 2px dashed var(--bad); }
+.demo-stats { display: flex; justify-content: space-between; gap: 8px; font-size: 0.82rem; color: var(--muted); }
+.demo-stats b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.demo-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-top: 12px; }
+.status { font-size: 0.92rem; min-height: 3em; margin: 0; flex: 1 1 260px; }
+@media (max-width: 480px) { .status { min-height: 4.6em; } }
+
+button, .seg button { font: inherit; font-size: 0.92rem; font-weight: 500; color: var(--ink); cursor: pointer; background: var(--surface); border: 1.5px solid var(--ink); border-radius: 999px; padding: 7px 16px; }
+button:hover { background: var(--band); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--ink); color: var(--paper); }
+button.primary:hover { opacity: .9; background: var(--ink); }
+
+.toc { padding: 26px 0 6px; }
+.toc h2 { font-family: var(--display); font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.toc ol { margin: 0; padding-left: 1.4em; columns: 2; column-gap: 28px; font-size: 0.95rem; }
+.toc li { break-inside: avoid; margin: 2px 0; }
+@media (max-width: 480px) { .toc ol { columns: 1; } }
+
+section.step { padding: 36px 0 8px; scroll-margin-top: 12px; }
+.step-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.step-head.plain { border-top: 2px solid var(--ink); padding-top: 14px; }
+.num { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--ink); display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 1.05rem; }
+h2 { font-family: var(--display); font-weight: 800; font-size: 1.6rem; line-height: 1.2; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h3 { font-family: var(--display); font-weight: 600; font-size: 1.1rem; margin: 22px 0 6px; }
+p { margin: 0 0 14px; }
+.key { border-left: 3px solid var(--ink); padding: 2px 0 2px 14px; margin: 18px 0 8px; font-weight: 500; }
+.key span { display: block; font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+figure { margin: 18px 0; }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 16px; }
+figcaption { font-size: 0.86rem; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+.fig-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 12px; }
+.note { font-size: 0.8rem; color: var(--muted); }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--band); border-radius: 4px; padding: 0 4px; }
+
+.chip { font-family: var(--mono); font-size: 0.84rem; line-height: 1.5; white-space: pre; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink); display: inline-block; }
+.chip.d { background: var(--decode-tint); border-color: var(--decode); }
+
+
+/* Controls */
+.controls { display: grid; gap: 14px; margin-bottom: 16px; }
+.ctl label, .ctl .ctl-name { display: block; font-size: 0.84rem; color: var(--muted); margin-bottom: 5px; }
+.ctl output { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { padding: 5px 13px; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+input[type=range] { width: 100%; accent-color: var(--decode); height: 28px; margin: 0; }
+.readouts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 4px 0 14px; }
+.ro { background: var(--paper); border-radius: 10px; padding: 10px 10px 8px; }
+.ro b { display: block; font-family: var(--display); font-weight: 800; font-size: 1.4rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ro span { display: block; font-size: 0.76rem; color: var(--muted); line-height: 1.3; margin-top: 3px; }
+@media (max-width: 400px) { .ro b { font-size: 1.15rem; } }
+
+/* Sequence list */
+.seq { list-style: none; counter-reset: s; padding: 0; margin: 0 0 16px; display: grid; gap: 10px; }
+.seq li { counter-increment: s; display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
+.seq li::before { content: counter(s); display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--band); font-family: var(--display); font-weight: 800; font-size: 0.85rem; }
+
+/* Log card */
+.log { font-family: var(--mono); font-size: 0.78rem; line-height: 1.55; background: var(--band); border-radius: 10px; padding: 12px 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0 0; }
+.log .i { color: var(--muted); }
+.log .e { color: var(--bad); }
+.log b { font-weight: 500; color: var(--ink); }
+
+/* Quiz */
+.q { border-top: 1px solid var(--rule); padding: 14px 0 6px; }
+.q p { margin: 0 0 8px; font-weight: 500; }
+.q p .qn { font-family: var(--display); font-weight: 800; margin-right: 6px; }
+details summary { cursor: pointer; color: var(--decode); font-weight: 500; font-size: 0.92rem; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "+"; display: inline-block; width: 1em; font-weight: 600; }
+details[open] summary::before { content: "\2212"; }
+details .ans { margin: 8px 0 10px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; font-size: 0.95rem; }
+.recap ol { padding-left: 1.3em; margin: 0 0 14px; }
+.recap li { margin: 4px 0; }
+.next { background: var(--band); border-radius: 14px; padding: 18px; margin: 18px 0 8px; }
+.next b { font-family: var(--display); font-size: 1.15rem; display: block; margin-bottom: 4px; }
+.sources { font-size: 0.82rem; color: var(--muted); padding: 24px 0 48px; }
+.sources ul { padding-left: 1.1em; margin: 6px 0 0; }
+.sources a { color: var(--muted); }
+
+/* Lesson 4 */
+.words { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 14px 16px; margin: 6px 0 0; }
+.words h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.words dl { margin: 0; display: grid; grid-template-columns: 124px 1fr; gap: 6px 12px; font-size: 0.92rem; }
+.words dt { font-weight: 600; }
+.words dd { margin: 0; }
+@media (max-width: 400px) { .words dl { grid-template-columns: 1fr; gap: 0; } .words dd { margin-bottom: 8px; } }
+
+.track { position: relative; height: 16px; border-radius: 4px; background-image: linear-gradient(to right, var(--rule) 1px, transparent 1px); background-size: 25% 100%; }
+.fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; min-width: 2px; transition: width .3s ease; background: var(--decode); }
+.fill.muted { background: var(--off); }
+.hbars .row { margin: 8px 0; }
+.hbars .lab { display: flex; justify-content: space-between; gap: 8px; font-size: 0.86rem; margin-bottom: 3px; }
+.hbars .lab b { font-variant-numeric: tabular-nums; }
+
+/* Hero request bars */
+.panels { display: grid; gap: 14px; }
+.panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 0.86rem; margin-bottom: 5px; }
+.panel-head b { font-weight: 600; }
+.panel-head span { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.panel-head span strong { color: var(--ink); }
+.reqs { display: grid; gap: 3px; }
+.rq { display: flex; height: 16px; border-radius: 4px; overflow: hidden; gap: 2px; transition: opacity .25s; }
+.rq.off { opacity: 0; }
+.rq .s, .rq .own { height: 100%; }
+.rq .s { flex: 2048; }
+.rq .own { flex: 256; background: var(--prefill); }
+.rq .s.calc { background: var(--prefill); }
+.rq .s.hit { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.leg { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 10px; }
+.sw.calc { background: var(--prefill); } .sw.hit { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); } .sw.dec { background: var(--decode); }
+
+/* Block matcher */
+.scen { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.scen button { font-size: 0.84rem; padding: 5px 12px; }
+.scen button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.mrow { margin-bottom: 12px; }
+.mrow .who { font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; }
+.mrow .who span { font-weight: 400; color: var(--muted); }
+.mblocks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.mb { border-radius: 8px; padding: 5px 6px 6px; border: 1.5px solid var(--rule); background: var(--surface); min-height: 74px; display: grid; grid-template-rows: auto 1fr auto; gap: 3px; }
+.mb .fp { font-family: var(--mono); font-size: 0.68rem; color: var(--muted); }
+.mb .toks { display: flex; flex-wrap: wrap; gap: 2px 4px; align-content: start; font-family: var(--mono); font-size: 0.74rem; line-height: 1.35; }
+.mb .toks i { font-style: normal; }
+.mb .toks i.diff { color: var(--bad); font-weight: 600; text-decoration: underline; }
+.mb .st { font-size: 0.7rem; font-weight: 600; }
+.mb.cached { border-color: var(--decode); }
+.mb.hit { background: var(--decode-tint); border-color: var(--decode); }
+.mb.hit .st { color: var(--ink); }
+.mb.miss { background: var(--surface); border-color: var(--prefill); box-shadow: inset 0 0 0 1px var(--prefill); }
+.mb.miss .st { color: var(--prefill); }
+.mresult { font-size: 0.92rem; background: var(--paper); border-radius: 10px; padding: 8px 12px; margin-top: 4px; }
+
+/* Order compare */
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 480px) { .two { grid-template-columns: 1fr; } }
+.tpl { border-radius: 12px; padding: 12px; background: var(--surface); border: 1px solid var(--rule); }
+.tpl h4 { margin: 0 0 8px; font-size: 0.9rem; }
+.tpl.bad { box-shadow: inset 3px 0 0 var(--bad); }
+.tpl.good { box-shadow: inset 3px 0 0 var(--good); }
+.tpl ol { margin: 0; padding-left: 1.2em; font-size: 0.88rem; }
+.tpl li { margin: 3px 0; }
+.tpl .var { color: var(--bad); font-weight: 600; }
+.tpl .fixed { color: var(--ink); }
+.tpl p { margin: 8px 0 0; font-size: 0.84rem; color: var(--muted); }
+
+/* Free list */
+.freeq { display: flex; flex-wrap: wrap; gap: 4px; align-items: stretch; }
+.fq { flex: 0 0 auto; min-width: 58px; border-radius: 8px; padding: 6px 8px; font-size: 0.74rem; background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.fq b { display: block; font-family: var(--mono); font-size: 0.78rem; }
+.fq.lru { box-shadow: inset 0 0 0 2px var(--bad); }
+.fq.hit { background: var(--decode); color: #fff; box-shadow: none; }
+.fq-ends { display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--muted); margin-top: 6px; }
+
+/* Timeline */
+.tl { display: flex; height: 30px; gap: 1px; border-radius: 6px; overflow: hidden; margin: 8px 0 4px; }
+.tl div { min-width: 1px; }
+.tl .dp { background: var(--decode); }
+.tl .mp { background: var(--prefill); }
+.tl-ends { display: flex; justify-content: space-between; font-size: 0.76rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.levers { list-style: none; margin: 0; padding: 0; }
+.levers li { padding: 12px 0 12px 12px; border-bottom: 1px solid var(--rule); box-shadow: inset 3px 0 0 var(--decode); }
+.levers li:last-child { border-bottom: 0; }
+.levers .flag { font-family: var(--mono); font-size: 0.86rem; font-weight: 500; display: block; margin-bottom: 2px; }
+.levers p { margin: 0; font-size: 0.95rem; }
+.levers .cost { display: block; font-size: 0.84rem; color: var(--muted); margin-top: 3px; }
+.callout { background: var(--band); border-radius: 14px; padding: 16px; margin: 18px 0; }
+.callout b.h { font-family: var(--display); font-size: 1.1rem; display: block; margin-bottom: 6px; }
+.callout ul { margin: 0; padding-left: 1.1em; }
+.callout li { margin: 5px 0; }
+.warnbox { border-radius: 12px; padding: 12px 14px; background: var(--bad-tint); box-shadow: inset 3px 0 0 var(--bad); margin: 14px 0; font-size: 0.95rem; }
+</style>
+</head>
+<body>
+<div class="progress" aria-hidden="true"><span id="prog"></span></div>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="kicker"><span>Inference track, lesson 4 of 8</span><a href="https://claude.ai/artifact/8m8maPTnDHsbPQWnqjz1bA">Back to your prep plan</a></p>
+    <h1 aria-label="Don't compute the same prompt twice"><span class="t">Don't</span><span class="t"> compute</span><span class="t"> the</span><span class="t"> same</span><span class="t"> prompt</span><span class="t"> twice</span></h1>
+    <p class="lede">Many requests start with the same text. Prefix caching reuses the work already done for it. Chunked prefill stops one long prompt from freezing everyone else's replies.</p>
+
+    <div class="demo">
+      <p class="demo-title">Six attack prompts. Each one starts with the same 2,048-token system prompt and template, then adds 256 tokens of its own.</p>
+      <div class="panels">
+        <div>
+          <div class="panel-head"><b>Without prefix caching</b><span>computed: <strong id="nNo">13,824</strong> tokens</span></div>
+          <div class="reqs" id="reqNo" role="img" aria-label="Without prefix caching, all 2,304 tokens of every prompt are computed: 13,824 in total"></div>
+        </div>
+        <div>
+          <div class="panel-head"><b>With prefix caching</b><span>computed: <strong id="nYes">3,584</strong> tokens</span></div>
+          <div class="reqs" id="reqYes" role="img" aria-label="With prefix caching, the shared 2,048 tokens are computed once and reused: 3,584 in total"></div>
+        </div>
+      </div>
+      <div class="leg"><span><i class="sw calc"></i>computed in prefill</span><span><i class="sw hit"></i>reused from the cache</span></div>
+      <div class="demo-foot">
+        <p class="status" id="status" aria-live="polite"><b>Done.</b> The shared start is computed once. Prompts 2 to 6 only compute their own 256 tokens: 3.9 times less prefill work.</p>
+        <button class="primary" id="replay" type="button">Send the six prompts</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="words" aria-labelledby="wordsH">
+    <h2 id="wordsH">Words used in this lesson</h2>
+    <dl>
+      <dt>Prefix</dt><dd>The start of a prompt. Two prompts "share a prefix" when they begin with the same tokens.</dd>
+      <dt>Prefill</dt><dd>Reading the prompt and filling the KV cache for it (Lesson 1).</dd>
+      <dt>Block</dt><dd>16 tokens of KV cache (Lesson 3).</dd>
+      <dt>Fingerprint</dt><dd>A short code (a hash) that vLLM computes from a block's tokens, so it can find matching blocks quickly.</dd>
+      <dt>Cache hit</dt><dd>A block was found already computed, so it is reused.</dd>
+      <dt>Chunk</dt><dd>A piece of a long prompt, read in one pass.</dd>
+      <dt>Token budget</dt><dd>The most tokens one pass may process, set by <code>--max-num-batched-tokens</code>.</dd>
+    </dl>
+  </section>
+
+  <nav class="toc" aria-label="Lesson steps">
+    <h2>In this lesson</h2>
+    <ol>
+      <li><a href="#repeat">The same text, again and again</a></li>
+      <li><a href="#match">How vLLM finds a match</a></li>
+      <li><a href="#order">Fixed text first</a></li>
+      <li><a href="#evict">Where the cache lives</a></li>
+      <li><a href="#gains">What it speeds up</a></li>
+      <li><a href="#security">The cache can leak</a></li>
+      <li><a href="#chunked">Chunked prefill</a></li>
+      <li><a href="#settings">Settings to know</a></li>
+      <li><a href="#quiz">Check yourself</a></li>
+    </ol>
+  </nav>
+
+  <!-- 1 -->
+  <section class="step" id="repeat">
+    <div class="step-head"><span class="num">1</span><h2>The same text, again and again</h2></div>
+    <p>Look at the prompts a real server gets. Many of them start the same way:</p>
+    <ul>
+      <li>A long <strong>system prompt</strong> sent with every request to the same app.</li>
+      <li><strong>Examples</strong> placed in the prompt to show the model what to do.</li>
+      <li>A long <strong>document</strong> that users ask many questions about.</li>
+      <li>A <strong>chat</strong>: every new turn resends all the earlier turns.</li>
+      <li>Your <strong>red-team runs</strong>: one attack template, hundreds of attack texts.</li>
+    </ul>
+    <p>Without help, prefill computes the KV cache for that shared start every single time. The result is identical each time, so the work is wasted.</p>
+    <p class="key"><span>Key idea</span>If two prompts start with the same tokens, their KV cache for that start is exactly the same. It only needs computing once.</p>
+  </section>
+
+  <!-- 2 -->
+  <section class="step" id="match">
+    <div class="step-head"><span class="num">2</span><h2>How vLLM finds a match</h2></div>
+    <p>vLLM calls this <strong>automatic prefix caching</strong>. It works on the 16-token blocks from Lesson 3:</p>
+    <ol class="seq">
+      <li><span>When a block is full, vLLM gives it a fingerprint. The fingerprint comes from the block's own tokens <em>and</em> the fingerprint of the block before it.</span></li>
+      <li><span>When a new request arrives, vLLM computes the fingerprints of its blocks, from the start.</span></li>
+      <li><span>It looks each one up. Every match is reused. The first miss ends the search.</span></li>
+      <li><span>Prefill runs only for the tokens after the last match.</span></li>
+    </ol>
+    <p>Because each fingerprint includes the one before it, a block only matches if <em>everything before it</em> matches too. And only full blocks are cached, so a partly filled last block is always computed again.</p>
+    <figure class="fig">
+      <p class="fig-title">Try it: is the new request a cache hit?</p>
+      <div class="scen" id="scen" role="group" aria-label="Scenarios"></div>
+      <div class="mrow"><div class="who">Request 1 <span>(already processed, its blocks are in the cache)</span></div><div class="mblocks" id="m1"></div></div>
+      <div class="mrow"><div class="who">Request 2 <span>(new)</span></div><div class="mblocks" id="m2"></div></div>
+      <p class="mresult" id="mres" aria-live="polite"></p>
+      <figcaption>4 tokens per block and one word per token, to keep it small. vLLM uses 16 tokens per block. The fingerprints here are made up for the picture.</figcaption>
+    </figure>
+    <p class="key"><span>Key idea</span>A cache hit needs the exact same tokens from the very first one. The first difference stops all reuse after it.</p>
+  </section>
+
+  <!-- 3 -->
+  <section class="step" id="order">
+    <div class="step-head"><span class="num">3</span><h2>Fixed text first</h2></div>
+    <p>This gives one simple rule for writing prompt templates: <strong>put text that never changes first, and text that changes last.</strong> A date, a user name or a request ID at the top changes the very first block. Then nothing after it can be reused.</p>
+    <div class="two">
+      <div class="tpl bad"><h4>Cache-hostile order</h4>
+        <ol><li class="var">Request ID and timestamp</li><li class="fixed">System prompt (2,000 tokens)</li><li class="fixed">Attack instructions</li><li class="var">This attack's text</li></ol>
+        <p>The first block differs every time. Almost nothing is reused.</p></div>
+      <div class="tpl good"><h4>Cache-friendly order</h4>
+        <ol><li class="fixed">System prompt (2,000 tokens)</li><li class="fixed">Attack instructions</li><li class="var">This attack's text</li><li class="var">Request ID, if the model must see it</li></ol>
+        <p>Everything up to the attack text is reused.</p></div>
+    </div>
+    <p style="margin-top:14px">Small differences count too. An extra space, a different line ending or a changed chat template gives different tokens, and the cache misses.</p>
+    <p class="key"><span>Key idea</span>Fixed text first, changing text last. Keep the fixed part byte-for-byte identical.</p>
+  </section>
+
+  <!-- 4 -->
+  <section class="step" id="evict">
+    <div class="step-head"><span class="num">4</span><h2>Where the cache lives</h2></div>
+    <p>Prefix caching does not need extra memory. It uses the KV pool you already have (Lesson 2):</p>
+    <ul>
+      <li>While requests use a block, it stays put, and many requests can share it (Lesson 3).</li>
+      <li>When no request uses a block anymore, vLLM puts it on the free list <em>but keeps its contents</em>. A later request can still get a hit on it.</li>
+      <li>When vLLM needs a block, it takes the one at the front of the free list: the one used <strong>least recently</strong>. Only then is the old content gone.</li>
+    </ul>
+    <figure class="fig">
+      <p class="fig-title">The free list: blocks waiting to be reused</p>
+      <p class="note" style="margin:-6px 0 8px">Read left to right: overwritten first (least recently used) → freed most recently.</p>
+      <div class="freeq" role="img" aria-label="Free list from least to most recently used; a hit pulls a block out of the list">
+        <div class="fq lru"><b>#41</b>old chat</div>
+        <div class="fq"><b>#7</b>old chat</div>
+        <div class="fq"><b>#19</b>doc Q&amp;A</div>
+        <div class="fq hit"><b>#3</b>attack template</div>
+        <div class="fq"><b>#28</b>attack 17</div>
+        <div class="fq"><b>#12</b>attack 18</div>
+      </div>
+      
+      <figcaption>A new attack prompt hits block #3 (dark). vLLM takes it off the free list so it can't be overwritten, and uses it. Block #41, outlined, is the next one to be overwritten.</figcaption>
+    </figure>
+    <p>So a busy server keeps the most recently used prefixes. If memory is tight, an old prefix may be pushed out before it is reused, and the hit rate drops.</p>
+    <p class="key"><span>Key idea</span>The cache is just free memory that hasn't been overwritten yet. It costs no extra space.</p>
+  </section>
+
+  <!-- 5 -->
+  <section class="step" id="gains">
+    <div class="step-head"><span class="num">5</span><h2>What it speeds up</h2></div>
+    <p>Prefix caching skips prefill work, so it cuts <strong>time to first token</strong> and frees GPU compute for other requests. It does not change decode: every new token still needs its own pass (Lesson 1). The vLLM docs call it "almost a free lunch", because it doesn't change the model's output.</p>
+    <figure class="fig">
+      <p class="fig-title">Try it: your workload</p>
+      <div class="controls">
+        <div class="ctl"><label for="sIn">Shared start of every prompt: <output id="sOut">2,048 tokens</output></label><input type="range" id="sIn" min="0" max="8192" step="256" value="2048"></div>
+        <div class="ctl"><label for="uIn">Each prompt's own text: <output id="uOut">256 tokens</output></label><input type="range" id="uIn" min="64" max="4096" step="64" value="256"></div>
+        <div class="ctl"><span class="ctl-name" id="nLab">Prompts sent</span><div class="seg" id="nSeg" role="group" aria-labelledby="nLab"></div></div>
+      </div>
+      <div class="hbars" id="gBars"></div>
+      <div class="readouts" aria-live="polite">
+        <div class="ro"><b id="gHit">89%</b><span>of prompt tokens come from the cache</span></div>
+        <div class="ro"><b id="gT0">119 ms</b><span>prefill math per prompt, no cache</span></div>
+        <div class="ro"><b id="gT1">13 ms</b><span>with a cache hit</span></div>
+      </div>
+      <figcaption>Llama 3.1 8B on an A100 80GB SXM at peak speed, from Lesson 1: about 0.05 ms of math per prompt token, and never less than 7.9 ms per pass. Real systems are slower, but the ratio holds. Only full 16-token blocks count as shared.</figcaption>
+    </figure>
+    <p>Sharing also saves memory while requests run together. Say 100 attacks share a 2,048-token start. Stored once, it takes about 0.27 GB of KV cache. As 100 copies, it would take about 26.8 GB.</p>
+    <p class="key"><span>Key idea</span>Prefix caching makes prefill cheaper and saves memory. Decode speed stays the same.</p>
+  </section>
+
+  <!-- 6 -->
+  <section class="step" id="security">
+    <div class="step-head"><span class="num">6</span><h2>The cache can leak</h2></div>
+    <p>This matters on any shared server. A cache hit makes the first token arrive sooner. Someone who can send prompts to the <em>same server</em> can measure that delay to learn what <em>other</em> users sent:</p>
+    <ol class="seq">
+      <li><span>A user sends a prompt that starts with something private.</span></li>
+      <li><span>An attacker on the same server sends a guess of that start.</span></li>
+      <li><span>If the first token comes back unusually fast, the guess was in the cache. The guess was right.</span></li>
+    </ol>
+    <p>Researchers have shown this kind of attack works against vLLM and SGLang. By default, vLLM shares its prefix cache across <em>all</em> requests on a server.</p>
+    <div class="warnbox"><strong>The fix: <code>cache_salt</code>.</strong> Send a salt value with each request, for example one per team or per app. vLLM mixes it into the first block's fingerprint, so only requests with the same salt can share blocks. It is off unless your gateway or app sets it.</div>
+    <p>Even this fix has had bugs. In CVE-2026-105752, vLLM lost the salt in some multi-turn requests with tool calls, sent through the <code>/v1/responses</code> endpoint. Those turns went into the shared cache. Keep vLLM up to date.</p>
+    <p class="key"><span>Key idea</span>A shared prefix cache is a shared secret channel. On a multi-tenant server, set <code>cache_salt</code> per tenant, and add this to your red-team test plan.</p>
+  </section>
+
+  <!-- 7 -->
+  <section class="step" id="chunked">
+    <div class="step-head"><span class="num">7</span><h2>Chunked prefill</h2></div>
+    <p>Now the second problem. Suppose 16 users are chatting, getting a token every pass. Then someone sends a 32,000-token prompt. If its whole prefill runs in one pass, that pass takes far longer than normal. All 16 users see their reply freeze. This is called a <strong>generation stall</strong>. A 2024 paper, Sarathi-Serve, showed these stalls could last several seconds in vLLM at the time.</p>
+    <p>The fix is <strong>chunked prefill</strong>. The long prompt is cut into chunks. Each pass first includes every running decode, then fills the rest of the token budget with the next chunk. Decodes never wait for a whole prefill. In vLLM V1 this is always on.</p>
+    <figure class="fig">
+      <p class="fig-title">Try it: one long prompt arrives while 16 users are chatting</p>
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="lpLab">Length of the long prompt</span><div class="seg" id="lpSeg" role="group" aria-labelledby="lpLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="bLab">Token budget per pass (<code>--max-num-batched-tokens</code>)</span><div class="seg" id="bSeg" role="group" aria-labelledby="bLab"></div></div>
+      </div>
+      <div class="tl" id="tl" role="img" aria-label="Timeline of passes"></div>
+      <div class="tl-ends"><span>0 ms</span><span id="tlEnd"></span></div>
+      <div class="leg"><span><i class="sw dec"></i>normal pass: only the 16 chats</span><span><i class="sw calc"></i>pass that also reads part of the long prompt</span></div>
+      <div class="readouts" style="margin-top:12px" aria-live="polite">
+        <div class="ro"><b id="cGap">1.69 s</b><span>longest freeze the 16 chats see</span></div>
+        <div class="ro"><b id="cTtft">1.69 s</b><span>first token of the long prompt</span></div>
+        <div class="ro"><b id="cPass">1</b><span>passes to read the long prompt</span></div>
+      </div>
+      <figcaption>Each segment is one pass, drawn to scale. Every chatting user gets one token at the end of each pass, so a wide segment is a freeze. Ideal-hardware numbers for Llama 3.1 8B on an A100 80GB SXM, as in Lesson 1. A normal pass takes 7.9 ms.</figcaption>
+    </figure>
+    <p>The token budget is the dial. The vLLM docs put it simply: a smaller budget, such as 2,048, gives smoother token streams (better inter-token latency), because prefills slow down decodes less. A bigger budget gives a faster first token for long prompts. For the most throughput, the docs suggest a budget above about 8,000 for smaller models on large GPUs.</p>
+    <p class="key"><span>Key idea</span>Chunked prefill splits long prompts across passes, so running chats keep getting tokens. The token budget trades smooth streaming against first-token speed.</p>
+  </section>
+
+  <!-- 8 -->
+  <section class="step" id="settings">
+    <div class="step-head"><span class="num">8</span><h2>Settings to know</h2></div>
+    <ul class="levers">
+      <li><span class="flag">Prefix caching</span><p>On by default in vLLM V1 for text models. To turn it off, use <code>--no-enable-prefix-caching</code>.</p><span class="cost">Check it works: the log line "Prefix cache hit rate", or the Prometheus counters <code>vllm:prefix_cache_queries</code> and <code>vllm:prefix_cache_hits</code>.</span></li>
+      <li><span class="flag">cache_salt</span><p>A field in each request. Requests share cached blocks only if their salts match.</p><span class="cost">Set it per tenant on any shared server.</span></li>
+      <li><span class="flag">--prefix-caching-hash-algo</span><p>How fingerprints are made. Since v0.11 the default is SHA-256, which avoids accidental collisions.</p><span class="cost">Faster options exist but are weaker.</span></li>
+      <li><span class="flag">--max-num-batched-tokens</span><p>The token budget per pass, and so the chunk size for long prompts.</p><span class="cost">Smaller: smoother streaming. Bigger: faster first token and more throughput.</span></li>
+    </ul>
+    <div class="callout">
+      <b class="h">For your red-team runs</b>
+      <ul>
+        <li>Put the system prompt and attack template first, and each attack's text last.</li>
+        <li>Keep IDs, dates and run numbers out of the start of the prompt.</li>
+        <li>For multi-turn attacks, resend earlier turns exactly as before, so they hit the cache.</li>
+        <li>Watch the hit rate. For a run with one shared template, it should be high.</li>
+        <li>If you test very long prompts, expect other runs on the same server to stream more slowly while they are read.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- Quiz -->
+  <section class="step" id="quiz">
+    <div class="step-head plain"><h2>Check yourself</h2></div>
+    <p>Answer each one first, out loud or in chat, then open the answer.</p>
+    <div class="q"><p><span class="qn">1</span>Two prompts share their first 100 tokens. Blocks hold 16 tokens. How many tokens can the second prompt reuse?</p>
+      <details><summary>Show answer</summary><div class="ans">96. Only full blocks are cached: 100 ÷ 16 = 6 full blocks, which is 96 tokens. The last 4 shared tokens sit in a partly filled block and are computed again.</div></details></div>
+    <div class="q"><p><span class="qn">2</span>Your attack template starts with "Run ID: 8f3a…" and then the 2,000-token system prompt. What will the hit rate be, and what do you change?</p>
+      <details><summary>Show answer</summary><div class="ans">Close to zero, because the first block differs every time and breaks the chain. Move the run ID to the end, or drop it from the prompt.</div></details></div>
+    <div class="q"><p><span class="qn">3</span>Does prefix caching make tokens stream faster once the reply has started?</p>
+      <details><summary>Show answer</summary><div class="ans">No. It skips prefill work, so the first token comes sooner. Every later token still needs its own decode pass. It can help indirectly by saving memory, which lets more requests run together.</div></details></div>
+    <div class="q"><p><span class="qn">4</span>16 users are chatting when a 32,000-token prompt arrives. Roughly how long do they freeze without chunking? And with a budget of 2,048?</p>
+      <details><summary>Show answer</summary><div class="ans">Without chunking: one pass of about 32,000 × 0.05 ms ≈ 1.6 seconds at ideal speed. With 2,048: the prompt is read over 16 passes of about 0.1 s each, so each freeze is about 0.1 s.</div></details></div>
+    <div class="q"><p><span class="qn">5</span>Two business units share one vLLM server. How do you stop one from learning the other's prompts through response timing?</p>
+      <details><summary>Show answer</summary><div class="ans">Send a different <code>cache_salt</code> for each unit, for example set by the gateway, so their prefix caches never mix. Keep vLLM updated too, because the salt has had bugs such as CVE-2026-105752.</div></details></div>
+  </section>
+
+  <section class="step recap" id="next">
+    <div class="step-head plain"><h2>What to remember</h2></div>
+    <ol>
+      <li>Prompts that start the same have the same KV cache for that start. vLLM reuses it automatically.</li>
+      <li>A block matches only if it and every block before it match. Put fixed text first.</li>
+      <li>Cached blocks are free blocks not yet overwritten, removed least recently used first. No extra memory.</li>
+      <li>On a shared server, the cache can leak prompts through timing. Use <code>cache_salt</code>.</li>
+      <li>Chunked prefill splits long prompts so chats keep streaming. <code>--max-num-batched-tokens</code> sets the trade-off.</li>
+    </ol>
+    <div class="next"><b>Next: Lesson 5, making it cheaper</b>Quantization (8-bit and 4-bit weights, FP8) and speculative decoding: the one trick that beats the decode speed limit from Lesson 1.</div>
+    <p style="margin-top:14px"><a href="https://claude.ai/artifact/4Nj8k5bGo7u6JcVmTAFwtj">Back to Lesson 3</a></p>
+  </section>
+
+  <footer class="sources">
+    Sources
+    <ul>
+      <li><a href="https://docs.vllm.ai/en/v0.25.0/design/prefix_caching/">vLLM design doc: automatic prefix caching</a>: fingerprints chained to the block before, full blocks only, LRU free list, cache_salt, "almost a free lunch"</li>
+      <li><a href="https://docs.vllm.ai/en/v0.17.0/design/prefix_caching/">vLLM design doc, v0.17</a>: SHA-256 default hash since v0.11, <code>--prefix-caching-hash-algo</code></li>
+      <li><a href="https://packet.ai/blog/vllm-prefix-caching">Packet.ai: vLLM prefix caching</a>: on by default in V1, <code>--no-enable-prefix-caching</code>, hit-rate counters</li>
+      <li><a href="https://docs.vllm.ai/en/v0.11.2/configuration/optimization/">vLLM docs: optimization and tuning</a>: chunked prefill always on in V1, decode-first, token budget trade-off</li>
+      <li><a href="https://docs.vllm.ai/en/v0.9.2/configuration/optimization.html">vLLM docs, v0.9.2</a>: budget above about 8,000 for throughput</li>
+      <li><a href="https://arxiv.org/abs/2403.02310">Agrawal et al., Sarathi-Serve (OSDI 2024)</a>: chunked prefills, stall-free batching, multi-second stalls</li>
+      <li><a href="https://www.alphaxiv.org/abs/2603.10726v2">Pennas et al., PrefixWall (2026)</a>: timing side channels from prefix caching</li>
+      <li><a href="https://obormot.github.io/posts/prefix-cache-timing-side-channel/">KV cache timing side-channel write-up</a>: attacks shown against vLLM and SGLang</li>
+      <li><a href="https://tianpan.co/blog/2026-04-10-cross-tenant-data-leakage-llm-infrastructure">Tian Pan: cross-tenant leakage</a>: cache_salt is opt-in</li>
+      <li><a href="https://access.redhat.com/security/cve/CVE-2026-105752">Red Hat: CVE-2026-105752</a>: cache salt lost in multi-turn tool continuations</li>
+    </ul>
+  </footer>
+</main>
+
+<script>
+(function () {
+  const $ = (s) => document.querySelector(s);
+  const fmt = (n, d = 0) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const prog = $('#prog');
+  const onScroll = () => { const h = document.documentElement; const max = h.scrollHeight - h.clientHeight; prog.style.width = (max > 0 ? h.scrollTop / max * 100 : 0) + '%'; };
+  window.addEventListener('scroll', onScroll, { passive: true }); onScroll();
+  function seg(host, items, obj, key, cb, label) {
+    const btns = items.map((it, i) => {
+      const b = el('button', null, label ? label(it) : it.name); b.type = 'button';
+      b.setAttribute('aria-pressed', String(i === obj[key]));
+      b.addEventListener('click', () => { obj[key] = i; btns.forEach((x, j) => x.setAttribute('aria-pressed', String(j === i))); cb(); });
+      host.appendChild(b); return b;
+    });
+  }
+  function bars(host, rows, scale) {
+    host.innerHTML = '';
+    rows.forEach((r) => {
+      const row = el('div', 'row');
+      const lab = el('div', 'lab'); lab.appendChild(el('span', null, r.name)); lab.appendChild(el('b', null, r.text));
+      const tr = el('div', 'track'); const f = el('div', 'fill' + (r.cls ? ' ' + r.cls : '')); f.style.width = (Math.min(1, r.v / scale) * 100) + '%';
+      tr.appendChild(f); row.appendChild(lab); row.appendChild(tr); host.appendChild(row);
+    });
+  }
+
+  /* Ideal-hardware model from Lesson 1 */
+  const READ = 7.88, TOK = 2 * 8.03e9 / 312e12 * 1000;
+  const passMs = (n) => Math.max(READ, n * TOK);
+
+  /* Hero */
+  const N = 6, SH = 2048, OWN = 256;
+  const rowsNo = [], rowsYes = [];
+  function mkRow(host, hit) {
+    const r = el('div', 'rq'); const s = el('div', 's ' + (hit ? 'hit' : 'calc')); const u = el('div', 'own');
+    r.appendChild(s); r.appendChild(u); host.appendChild(r); return r;
+  }
+  for (let i = 0; i < N; i++) { rowsNo.push(mkRow($('#reqNo'), false)); rowsYes.push(mkRow($('#reqYes'), i > 0)); }
+  const totNo = N * (SH + OWN), totYes = (SH + OWN) + (N - 1) * OWN;
+  $('#nNo').textContent = fmt(totNo); $('#nYes').textContent = fmt(totYes);
+  let timers = [];
+  const btn = $('#replay'), statusEl = $('#status');
+  btn.addEventListener('click', () => {
+    timers.forEach(clearTimeout); timers = []; btn.disabled = true;
+    rowsNo.concat(rowsYes).forEach((r) => r.classList.add('off'));
+    $('#nNo').textContent = '0'; $('#nYes').textContent = '0';
+    statusEl.innerHTML = '<b>Sending.</b> Watch the bottom panel after the first prompt.';
+    for (let i = 0; i < N; i++) {
+      timers.push(setTimeout(() => {
+        rowsNo[i].classList.remove('off'); rowsYes[i].classList.remove('off');
+        $('#nNo').textContent = fmt((i + 1) * (SH + OWN));
+        $('#nYes').textContent = fmt((SH + OWN) + i * OWN);
+        statusEl.innerHTML = i === 0
+          ? '<b>Prompt 1.</b> Nothing is cached yet, so both panels compute all 2,304 tokens.'
+          : '<b>Prompt ' + (i + 1) + '.</b> With prefix caching, the 2,048 shared tokens are found in the cache. Only 256 new tokens are computed.';
+        if (i === N - 1) timers.push(setTimeout(() => {
+          statusEl.innerHTML = '<b>Done.</b> The shared start is computed once. Prompts 2 to 6 only compute their own 256 tokens: ' + fmt(totNo / totYes, 1) + ' times less prefill work.';
+          btn.disabled = false;
+        }, 900));
+      }, 400 + i * 650));
+    }
+  });
+
+  /* Step 2 block matcher */
+  const BASE = ['You', 'are', 'a', 'red', 'team', 'bot', '.', 'Write', 'one', 'short', 'attack', 'on'];
+  const R1 = BASE.concat(['home', 'loan', 'fraud', '.']);
+  const SCEN = [
+    { name: 'Same start, new topic', r2: BASE.concat(['card', 'limit', 'abuse', '.']) },
+    { name: 'Date added at the start', r2: ['Date', ':', '20', 'Nov'].concat(BASE) },
+    { name: 'One word changed', r2: BASE.slice(0, 9).concat(['long'], BASE.slice(10), ['home', 'loan', 'fraud', '.']) }
+  ];
+  function fnv(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(16).padStart(8, '0').slice(0, 4); }
+  function fingerprints(toks) { const out = []; let parent = ''; for (let i = 0; i < toks.length; i += 4) { const b = toks.slice(i, i + 4); const f = fnv(parent + '|' + b.join(' ')); out.push({ toks: b, fp: f }); parent = f; } return out; }
+  const ms = { s: 0 };
+  function drawBlocks(host, blocks, mode, other) {
+    host.innerHTML = '';
+    let chain = true;
+    blocks.forEach((b, i) => {
+      let cls = 'mb', st = '';
+      if (mode === 'cache') { cls += ' cached'; st = 'in cache'; }
+      else {
+        const hit = chain && other[i] && other[i].fp === b.fp;
+        if (!hit) chain = false;
+        cls += hit ? ' hit' : ' miss'; st = hit ? 'reused' : 'computed';
+      }
+      const d = el('div', cls);
+      d.appendChild(el('span', 'fp', '#' + b.fp));
+      const t = el('div', 'toks');
+      b.toks.forEach((w, j) => {
+        const o = other && other[i] ? other[i].toks[j] : null;
+        t.appendChild(el('i', mode !== 'cache' && o !== w ? 'diff' : null, w));
+      });
+      d.appendChild(t); d.appendChild(el('span', 'st', st)); host.appendChild(d);
+    });
+  }
+  const f1 = fingerprints(R1);
+  function renderMatch() {
+    const f2 = fingerprints(SCEN[ms.s].r2);
+    drawBlocks($('#m1'), f1, 'cache');
+    drawBlocks($('#m2'), f2, 'new', f1);
+    let hits = 0; for (let i = 0; i < f2.length; i++) { if (f1[i] && f1[i].fp === f2[i].fp) hits++; else break; }
+    const msgs = [
+      'Blocks 1 to 3 match. Only the last block, with the new topic, is computed.',
+      'Nothing is reused. The date changed the first block, and every later block’s fingerprint depends on it. The system prompt is all still there, just shifted, and that is enough to miss.',
+      'Blocks 1 and 2 are reused. Block 3 has a changed word. Block 4 has exactly the same words as before, but its fingerprint differs because the block before it changed, so it is computed again.'
+    ];
+    $('#mres').innerHTML = '<b>' + hits * 4 + ' of 16 tokens reused.</b> ' + msgs[ms.s];
+  }
+  seg($('#scen'), SCEN, ms, 's', renderMatch);
+  renderMatch();
+
+  /* Step 5 workload calculator */
+  const NS = [{ name: '10', v: 10 }, { name: '100', v: 100 }, { name: '500', v: 500 }];
+  const gs = { n: 2 };
+  const sIn = $('#sIn'), uIn = $('#uIn');
+  seg($('#nSeg'), NS, gs, 'n', renderGain);
+  [sIn, uIn].forEach((i) => i.addEventListener('input', renderGain));
+  function renderGain() {
+    const S = +sIn.value, U = +uIn.value, n = NS[gs.n].v;
+    const Sfull = Math.floor(S / 16) * 16;
+    $('#sOut').textContent = fmt(S) + ' tokens'; $('#uOut').textContent = fmt(U) + ' tokens';
+    const without = n * (S + U), withc = (S + U) + (n - 1) * (S + U - Sfull);
+    bars($('#gBars'), [
+      { name: 'Prompt tokens computed, no cache', v: without, text: fmt(without), cls: 'muted' },
+      { name: 'With prefix caching', v: withc, text: fmt(withc) }
+    ], without);
+    $('#gHit').textContent = fmt((without - withc) / without * 100, 0) + '%';
+    $('#gT0').textContent = fmt(passMs(S + U), 0) + ' ms';
+    $('#gT1').textContent = fmt(passMs(S + U - Sfull), 0) + ' ms';
+  }
+  renderGain();
+
+  /* Step 7 chunked prefill */
+  const LP = [{ name: '2,048', v: 2048 }, { name: '8,192', v: 8192 }, { name: '32,768', v: 32768 }];
+  const BUD = [{ name: 'No chunking', v: 0 }, { name: '8,192', v: 8192 }, { name: '2,048', v: 2048 }, { name: '512', v: 512 }];
+  const cs = { p: 2, b: 0 };
+  const D = 16;
+  seg($('#lpSeg'), LP, cs, 'p', renderChunk);
+  seg($('#bSeg'), BUD, cs, 'b', renderChunk);
+  function renderChunk() {
+    const P = LP[cs.p].v, B = BUD[cs.b].v;
+    const passes = [];
+    for (let i = 0; i < 3; i++) passes.push({ t: passMs(D), mixed: false });
+    let left = P, ttft = 0, gap = 0, n = 0;
+    if (!B) { const t = passMs(P + D); passes.push({ t, mixed: true }); ttft = t; gap = t; n = 1; }
+    else {
+      const chunk = B - D;
+      while (left > 0) { const c = Math.min(chunk, left); left -= c; const t = passMs(c + D); passes.push({ t, mixed: true }); ttft += t; gap = Math.max(gap, t); n++; }
+    }
+    for (let i = 0; i < 3; i++) passes.push({ t: passMs(D), mixed: false });
+    const total = passes.reduce((a, p) => a + p.t, 0);
+    const tl = $('#tl'); tl.innerHTML = '';
+    passes.forEach((p) => { const d = el('div', p.mixed ? 'mp' : 'dp'); d.style.flex = String(p.t); tl.appendChild(d); });
+    tl.setAttribute('aria-label', n + ' passes read the long prompt; the longest freeze is ' + fmt(gap) + ' ms');
+    $('#tlEnd').textContent = fmt(total) + ' ms';
+    const t = (ms) => ms >= 1000 ? fmt(ms / 1000, 2) + ' s' : fmt(ms) + ' ms';
+    $('#cGap').textContent = t(gap);
+    $('#cTtft').textContent = t(ttft);
+    $('#cPass').textContent = fmt(n);
+  }
+  renderChunk();
+})();
+</script>
+</body>
+</html>
