@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Measure It, Then Price It</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+
+
+:root {
+  /* Layout: same system as Lesson 1. One reading column (max 680px); each step = numbered heading, prose, one framed figure, one key idea.
+     Colour carries meaning: violet = model weights, teal = KV cache (decode memory), grey = overhead, hatched = held back. Amber stays prefill. */
+  --paper: #F4F6F9;
+  --band: #E8ECF2;
+  --surface: #FFFFFF;
+  --ink: #172036;
+  --muted: #586178;
+  --rule: #DCE1EA;
+  --prefill: #C27C0E;
+  --decode: #0088A3;
+  --decode-tint: #DBEEF2;
+  --weights: #7B5BD6;
+  --weights-tint: #EAE4FA;
+  --over: #A3ABB9;
+  --off: #B9C0CC;
+  --tok-a: #E3E8F0;
+  --tok-b: #D3DBE7;
+  --bad: #B42318;
+  --bad-tint: #FCE9E7;
+  --good: #1F7A4A;
+  --good-tint: #E3F3EA;
+  --display: 'Bricolage Grotesque', 'Avenir Next', system-ui, sans-serif;
+  --body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+    --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+    --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+    --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+  --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+  --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+  --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition: none !important; animation: none !important; } }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--body); font-size: 17px; line-height: 1.6; -webkit-text-size-adjust: 100%; }
+a { color: var(--decode); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--decode); outline-offset: 2px; border-radius: 4px; }
+.progress { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 10; }
+.progress span { display: block; height: 100%; width: 0; background: var(--decode); }
+.wrap { max-width: 680px; margin: 0 auto; padding: 0 20px; }
+
+/* Hero */
+.hero { background: var(--band); padding: 40px 0 32px; border-bottom: 1px solid var(--rule); }
+.kicker { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; }
+.kicker a { color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 800; font-size: clamp(2.2rem, 9vw, 3.4rem); line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 14px; text-wrap: balance; }
+h1 .t { border-radius: 6px; padding: 0 0.06em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+h1 .t:nth-child(odd) { background: var(--tok-a); }
+h1 .t:nth-child(even) { background: var(--tok-b); }
+.lede { font-size: 1.08rem; margin: 0 0 22px; max-width: 34em; }
+
+.demo { background: var(--surface); border: 1.5px solid var(--ink); border-radius: 16px; padding: 18px 16px 16px; }
+.demo-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 10px; }
+
+/* Memory bar */
+.mem { display: flex; height: 44px; border-radius: 8px; overflow: hidden; border: 1px solid var(--rule); background: var(--surface); }
+.mem > div { position: relative; min-width: 0; display: flex; align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 600; white-space: nowrap; overflow: hidden; transition: flex-basis .3s ease; }
+.mem .w { background: var(--weights); color: #fff; }
+.mem .o { background: var(--over); }
+.mem .k { background: var(--decode-tint); color: var(--ink); justify-content: flex-start; }
+.mem .k .kfill { position: absolute; inset: 0 auto 0 0; width: 100%; background: var(--decode); transition: width .25s linear; }
+.mem .k span { position: relative; padding-left: 8px; color: #fff; text-shadow: 0 0 2px rgba(0,0,0,.25); }
+.mem .h { background: repeating-linear-gradient(135deg, var(--off) 0 3px, transparent 3px 7px); color: var(--muted); }
+.mem-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 8px; }
+.mem-legend b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+.sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+.sw.w { background: var(--weights); } .sw.o { background: var(--over); } .sw.k { background: var(--decode); }
+.sw.h { background: repeating-linear-gradient(135deg, var(--off) 0 2px, transparent 2px 4px); box-shadow: inset 0 0 0 1px var(--off); }
+.sw.kv { background: var(--decode); } .sw.vv { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+
+.users { display: grid; grid-template-columns: repeat(auto-fill, minmax(13px, 1fr)); gap: 4px; margin: 14px 0 6px; }
+.u { aspect-ratio: 1; border-radius: 50%; border: 1.5px solid var(--rule); background: transparent; transition: background-color .15s, border-color .15s; }
+.u.on { background: var(--decode); border-color: var(--decode); }
+.u.wait { border: 2px dashed var(--bad); }
+.demo-stats { display: flex; justify-content: space-between; gap: 8px; font-size: 0.82rem; color: var(--muted); }
+.demo-stats b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.demo-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-top: 12px; }
+.status { font-size: 0.92rem; min-height: 3em; margin: 0; flex: 1 1 260px; }
+@media (max-width: 480px) { .status { min-height: 4.6em; } }
+
+button, .seg button { font: inherit; font-size: 0.92rem; font-weight: 500; color: var(--ink); cursor: pointer; background: var(--surface); border: 1.5px solid var(--ink); border-radius: 999px; padding: 7px 16px; }
+button:hover { background: var(--band); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--ink); color: var(--paper); }
+button.primary:hover { opacity: .9; background: var(--ink); }
+
+.toc { padding: 26px 0 6px; }
+.toc h2 { font-family: var(--display); font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.toc ol { margin: 0; padding-left: 1.4em; columns: 2; column-gap: 28px; font-size: 0.95rem; }
+.toc li { break-inside: avoid; margin: 2px 0; }
+@media (max-width: 480px) { .toc ol { columns: 1; } }
+
+section.step { padding: 36px 0 8px; scroll-margin-top: 12px; }
+.step-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.step-head.plain { border-top: 2px solid var(--ink); padding-top: 14px; }
+.num { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--ink); display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 1.05rem; }
+h2 { font-family: var(--display); font-weight: 800; font-size: 1.6rem; line-height: 1.2; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h3 { font-family: var(--display); font-weight: 600; font-size: 1.1rem; margin: 22px 0 6px; }
+p { margin: 0 0 14px; }
+.key { border-left: 3px solid var(--ink); padding: 2px 0 2px 14px; margin: 18px 0 8px; font-weight: 500; }
+.key span { display: block; font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+figure { margin: 18px 0; }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 16px; }
+figcaption { font-size: 0.86rem; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+.fig-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 12px; }
+.note { font-size: 0.8rem; color: var(--muted); }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--band); border-radius: 4px; padding: 0 4px; }
+
+.chip { font-family: var(--mono); font-size: 0.84rem; line-height: 1.5; white-space: pre; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink); display: inline-block; }
+.chip.d { background: var(--decode-tint); border-color: var(--decode); }
+
+
+/* Controls */
+.controls { display: grid; gap: 14px; margin-bottom: 16px; }
+.ctl label, .ctl .ctl-name { display: block; font-size: 0.84rem; color: var(--muted); margin-bottom: 5px; }
+.ctl output { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { padding: 5px 13px; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+input[type=range] { width: 100%; accent-color: var(--decode); height: 28px; margin: 0; }
+.readouts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 4px 0 14px; }
+.ro { background: var(--paper); border-radius: 10px; padding: 10px 10px 8px; }
+.ro b { display: block; font-family: var(--display); font-weight: 800; font-size: 1.4rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ro span { display: block; font-size: 0.76rem; color: var(--muted); line-height: 1.3; margin-top: 3px; }
+@media (max-width: 400px) { .ro b { font-size: 1.15rem; } }
+
+/* Sequence list */
+.seq { list-style: none; counter-reset: s; padding: 0; margin: 0 0 16px; display: grid; gap: 10px; }
+.seq li { counter-increment: s; display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
+.seq li::before { content: counter(s); display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--band); font-family: var(--display); font-weight: 800; font-size: 0.85rem; }
+
+/* Log card */
+.log { font-family: var(--mono); font-size: 0.78rem; line-height: 1.55; background: var(--band); border-radius: 10px; padding: 12px 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0 0; }
+.log .i { color: var(--muted); }
+.log .e { color: var(--bad); }
+.log b { font-weight: 500; color: var(--ink); }
+
+/* Quiz */
+.q { border-top: 1px solid var(--rule); padding: 14px 0 6px; }
+.q p { margin: 0 0 8px; font-weight: 500; }
+.q p .qn { font-family: var(--display); font-weight: 800; margin-right: 6px; }
+details summary { cursor: pointer; color: var(--decode); font-weight: 500; font-size: 0.92rem; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "+"; display: inline-block; width: 1em; font-weight: 600; }
+details[open] summary::before { content: "\2212"; }
+details .ans { margin: 8px 0 10px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; font-size: 0.95rem; }
+.recap ol { padding-left: 1.3em; margin: 0 0 14px; }
+.recap li { margin: 4px 0; }
+.next { background: var(--band); border-radius: 14px; padding: 18px; margin: 18px 0 8px; }
+.next b { font-family: var(--display); font-size: 1.15rem; display: block; margin-bottom: 4px; }
+.sources { font-size: 0.82rem; color: var(--muted); padding: 24px 0 48px; }
+.sources ul { padding-left: 1.1em; margin: 6px 0 0; }
+.sources a { color: var(--muted); }
+
+/* Lesson 4 */
+.words { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 14px 16px; margin: 6px 0 0; }
+.words h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.words dl { margin: 0; display: grid; grid-template-columns: 124px 1fr; gap: 6px 12px; font-size: 0.92rem; }
+.words dt { font-weight: 600; }
+.words dd { margin: 0; }
+@media (max-width: 400px) { .words dl { grid-template-columns: 1fr; gap: 0; } .words dd { margin-bottom: 8px; } }
+
+.track { position: relative; height: 16px; border-radius: 4px; background-image: linear-gradient(to right, var(--rule) 1px, transparent 1px); background-size: 25% 100%; }
+.fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; min-width: 2px; transition: width .3s ease; background: var(--decode); }
+.fill.muted { background: var(--off); }
+.hbars .row { margin: 8px 0; }
+.hbars .lab { display: flex; justify-content: space-between; gap: 8px; font-size: 0.86rem; margin-bottom: 3px; }
+.hbars .lab b { font-variant-numeric: tabular-nums; }
+
+/* Hero request bars */
+.panels { display: grid; gap: 14px; }
+.panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 0.86rem; margin-bottom: 5px; }
+.panel-head b { font-weight: 600; }
+.panel-head span { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.panel-head span strong { color: var(--ink); }
+.reqs { display: grid; gap: 3px; }
+.rq { display: flex; height: 16px; border-radius: 4px; overflow: hidden; gap: 2px; transition: opacity .25s; }
+.rq.off { opacity: 0; }
+.rq .s, .rq .own { height: 100%; }
+.rq .s { flex: 2048; }
+.rq .own { flex: 256; background: var(--prefill); }
+.rq .s.calc { background: var(--prefill); }
+.rq .s.hit { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.leg { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 10px; }
+.sw.calc { background: var(--prefill); } .sw.hit { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); } .sw.dec { background: var(--decode); }
+
+/* Block matcher */
+.scen { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.scen button { font-size: 0.84rem; padding: 5px 12px; }
+.scen button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.mrow { margin-bottom: 12px; }
+.mrow .who { font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; }
+.mrow .who span { font-weight: 400; color: var(--muted); }
+.mblocks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.mb { border-radius: 8px; padding: 5px 6px 6px; border: 1.5px solid var(--rule); background: var(--surface); min-height: 74px; display: grid; grid-template-rows: auto 1fr auto; gap: 3px; }
+.mb .fp { font-family: var(--mono); font-size: 0.68rem; color: var(--muted); }
+.mb .toks { display: flex; flex-wrap: wrap; gap: 2px 4px; align-content: start; font-family: var(--mono); font-size: 0.74rem; line-height: 1.35; }
+.mb .toks i { font-style: normal; }
+.mb .toks i.diff { color: var(--bad); font-weight: 600; text-decoration: underline; }
+.mb .st { font-size: 0.7rem; font-weight: 600; }
+.mb.cached { border-color: var(--decode); }
+.mb.hit { background: var(--decode-tint); border-color: var(--decode); }
+.mb.hit .st { color: var(--ink); }
+.mb.miss { background: var(--surface); border-color: var(--prefill); box-shadow: inset 0 0 0 1px var(--prefill); }
+.mb.miss .st { color: var(--prefill); }
+.mresult { font-size: 0.92rem; background: var(--paper); border-radius: 10px; padding: 8px 12px; margin-top: 4px; }
+
+/* Order compare */
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 480px) { .two { grid-template-columns: 1fr; } }
+.tpl { border-radius: 12px; padding: 12px; background: var(--surface); border: 1px solid var(--rule); }
+.tpl h4 { margin: 0 0 8px; font-size: 0.9rem; }
+.tpl.bad { box-shadow: inset 3px 0 0 var(--bad); }
+.tpl.good { box-shadow: inset 3px 0 0 var(--good); }
+.tpl ol { margin: 0; padding-left: 1.2em; font-size: 0.88rem; }
+.tpl li { margin: 3px 0; }
+.tpl .var { color: var(--bad); font-weight: 600; }
+.tpl .fixed { color: var(--ink); }
+.tpl p { margin: 8px 0 0; font-size: 0.84rem; color: var(--muted); }
+
+/* Free list */
+.freeq { display: flex; flex-wrap: wrap; gap: 4px; align-items: stretch; }
+.fq { flex: 0 0 auto; min-width: 58px; border-radius: 8px; padding: 6px 8px; font-size: 0.74rem; background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.fq b { display: block; font-family: var(--mono); font-size: 0.78rem; }
+.fq.lru { box-shadow: inset 0 0 0 2px var(--bad); }
+.fq.hit { background: var(--decode); color: #fff; box-shadow: none; }
+.fq-ends { display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--muted); margin-top: 6px; }
+
+/* Timeline */
+.tl { display: flex; height: 30px; gap: 1px; border-radius: 6px; overflow: hidden; margin: 8px 0 4px; }
+.tl div { min-width: 1px; }
+.tl .dp { background: var(--decode); }
+.tl .mp { background: var(--prefill); }
+.tl-ends { display: flex; justify-content: space-between; font-size: 0.76rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.levers { list-style: none; margin: 0; padding: 0; }
+.levers li { padding: 12px 0 12px 12px; border-bottom: 1px solid var(--rule); box-shadow: inset 3px 0 0 var(--decode); }
+.levers li:last-child { border-bottom: 0; }
+.levers .flag { font-family: var(--mono); font-size: 0.86rem; font-weight: 500; display: block; margin-bottom: 2px; }
+.levers p { margin: 0; font-size: 0.95rem; }
+.levers .cost { display: block; font-size: 0.84rem; color: var(--muted); margin-top: 3px; }
+.callout { background: var(--band); border-radius: 14px; padding: 16px; margin: 18px 0; }
+.callout b.h { font-family: var(--display); font-size: 1.1rem; display: block; margin-bottom: 6px; }
+.callout ul { margin: 0; padding-left: 1.1em; }
+.callout li { margin: 5px 0; }
+.warnbox { border-radius: 12px; padding: 12px 14px; background: var(--bad-tint); box-shadow: inset 3px 0 0 var(--bad); margin: 14px 0; font-size: 0.95rem; }
+.formula { font-family: var(--display); font-weight: 600; font-size: 1.05rem; text-align: center; background: var(--surface); border: 1px dashed var(--muted); border-radius: 12px; padding: 14px 12px; margin: 16px 0; }
+.mresult { font-size: 0.92rem; background: var(--paper); border-radius: 10px; padding: 8px 12px; margin-top: 4px; }
+
+/* Lesson 8 */
+main p code, main li code { white-space: nowrap; }
+.chart { width: 100%; display: block; touch-action: pan-y; }
+.chart text { font-family: var(--body); font-size: 11px; fill: var(--muted); }
+.chart text.lbl { fill: var(--ink); font-weight: 600; }
+.chart .gl { stroke: var(--rule); stroke-width: 1; }
+.chart .p50 { fill: none; stroke: var(--decode); stroke-width: 2; }
+.chart .p95 { fill: none; stroke: var(--prefill); stroke-width: 2; }
+.chart .dot50 { fill: var(--decode); stroke: var(--surface); stroke-width: 1.5; }
+.chart .dot95 { fill: var(--prefill); stroke: var(--surface); stroke-width: 1.5; }
+.chart .slo { stroke: var(--ink); stroke-width: 1.25; stroke-dasharray: 5 3; }
+.chart .over { fill: var(--bad-tint); }
+.chart .capl { stroke: var(--good); stroke-width: 2; }
+.chart .cur { stroke: var(--ink); stroke-width: 1; }
+.chart-lab { font-size: 0.82rem; font-weight: 600; margin: 12px 0 2px; }
+.leg3 { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
+.leg3 i { display: inline-block; width: 14px; height: 0; border-top: 2.5px solid; vertical-align: 3px; margin-right: 5px; }
+.scrub-out { font-size: 0.84rem; min-height: 2.8em; margin: 8px 0 0; }
+pre.cmd { font-family: var(--mono); font-size: 0.78rem; background: var(--band); border-radius: 10px; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 10px 0; line-height: 1.55; }
+.loop { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.loop > div { border-radius: 10px; padding: 10px; background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--rule); font-size: 0.84rem; }
+.loop b { display: block; margin-bottom: 4px; }
+.loop .tl { display: flex; gap: 3px; margin: 8px 0 6px; height: 16px; align-items: center; }
+.loop .tl span { height: 12px; border-radius: 3px; background: var(--decode); }
+.loop .tl span.gap { background: transparent; box-shadow: inset 0 0 0 1px var(--rule); }
+.range-row { display: flex; align-items: center; gap: 10px; }
+.range-row input[type=range] { flex: 1; accent-color: var(--ink); min-height: 32px; }
+.range-row output { font-family: var(--display); font-weight: 800; font-size: 1.1rem; min-width: 4.2em; text-align: right; font-variant-numeric: tabular-nums; }
+.tmpl { display: grid; grid-template-columns: 76px 1fr; gap: 0; margin: 10px 0; background: var(--surface); border-radius: 12px; padding: 4px 12px; box-shadow: inset 0 0 0 1px var(--rule); font-size: 0.86rem; }
+.tmpl dt, .tmpl dd { margin: 0; padding: 8px 0; border-bottom: 1px solid var(--rule); }
+.tmpl dt { font-weight: 600; }
+.tmpl dt:last-of-type, .tmpl dd:last-of-type { border-bottom: 0; }
+.track-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; counter-reset: l; }
+.track-list li { counter-increment: l; display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: baseline; }
+.track-list li::before { content: counter(l); display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--band); font-family: var(--display); font-weight: 800; font-size: 0.85rem; }
+.track-list li span { color: var(--muted); font-size: 0.86rem; display: block; }
+</style>
+</head>
+<body>
+<div class="progress" aria-hidden="true"><span id="prog"></span></div>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="kicker"><span>Inference track, lesson 8 of 8</span><a href="https://claude.ai/artifact/8m8maPTnDHsbPQWnqjz1bA">Back to your prep plan</a></p>
+    <h1 aria-label="Measure it, then price it"><span class="t">Measure</span><span class="t"> it,</span><span class="t"> then</span><span class="t"> price</span><span class="t"> it</span></h1>
+    <p class="lede">A good benchmark answers one question: how much traffic can this setup take while still meeting its latency targets? Once you know that, the cost per token is simple division.</p>
+
+    <div class="demo">
+      <p class="demo-title">Try it: raise the traffic on one A100 until it misses its targets</p>
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="wLab">Workload</span><div class="seg" id="wSeg" role="group" aria-labelledby="wLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="ttLab">Target: 95% of first tokens within</span><div class="seg" id="ttSeg" role="group" aria-labelledby="ttLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="tpLab">Target: 95% of replies at most this per token</span><div class="seg" id="tpSeg" role="group" aria-labelledby="tpLab"></div></div>
+      </div>
+      <p class="chart-lab">Time to first token (log scale)</p>
+      <svg class="chart" id="cT" viewBox="0 0 340 130" role="img" aria-label="Time to first token versus request rate"></svg>
+      <p class="chart-lab">Time per output token (log scale)</p>
+      <svg class="chart" id="cP" viewBox="0 0 340 145" role="img" aria-label="Time per output token versus request rate"></svg>
+      <div class="leg3"><span><i style="border-color:var(--decode)"></i>median (p50)</span><span><i style="border-color:var(--prefill)"></i>p95</span><span><i style="border-color:var(--ink);border-top-style:dashed"></i>target</span><span><i style="border-color:var(--good)"></i>most load that meets both</span></div>
+      <p class="scrub-out" id="hOut" aria-live="polite">Touch or hover the charts to read each load level.</p>
+      <div class="readouts">
+        <div class="ro"><b id="hCap">7.5</b><span>requests/s within both targets</span></div>
+        <div class="ro"><b id="hTok">1,877</b><span>output tokens/s at that load</span></div>
+        <div class="ro"><b id="hCost">$0.30</b><span>per million output tokens at $2/GPU-hour</span></div>
+      </div>
+      <p class="note" style="margin:0">A toy model, not a measurement: Llama 3.1 8B in 16-bit on an A100 80GB. It assumes 80% of the GPU's memory speed and 60% of its math speed. Chunked prefill with 2,048 tokens per step, up to 256 requests at once, random arrivals, 1,000 requests per load level.</p>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="words" aria-labelledby="wordsH">
+    <h2 id="wordsH">Words used in this lesson</h2>
+    <dl>
+      <dt>Request rate</dt><dd>New requests arriving per second.</dd>
+      <dt>Concurrency</dt><dd>Requests in progress at the same moment.</dd>
+      <dt>Percentile</dt><dd>p95 = 95% of requests were this fast or faster. p50 is the median.</dd>
+      <dt>SLO</dt><dd>Service level objective: a latency target, such as "p95 first token under 1 s".</dd>
+      <dt>Goodput</dt><dd>Requests per second that met every target.</dd>
+      <dt>Sweep</dt><dd>Running the same test at several load levels.</dd>
+    </dl>
+  </section>
+
+  <nav class="toc" aria-label="Lesson steps">
+    <h2>In this lesson</h2>
+    <ol>
+      <li><a href="#question">The real question</a></li>
+      <li><a href="#pct">Read percentiles, not averages</a></li>
+      <li><a href="#rate">Request rate versus concurrency</a></li>
+      <li><a href="#curve">The curve and its knee</a></li>
+      <li><a href="#traps">Traps to avoid</a></li>
+      <li><a href="#cost">Cost per million tokens</a></li>
+      <li><a href="#writeup">Write it up</a></li>
+      <li><a href="#quiz">Check yourself</a></li>
+      <li><a href="#track">The whole track</a></li>
+    </ol>
+  </nav>
+
+  <section class="step" id="question">
+    <div class="step-head"><span class="num">1</span><h2>The real question</h2></div>
+    <p>"How fast is it?" has two very different answers. Look at the chat workload above:</p>
+    <ul>
+      <li><strong>Maximum throughput:</strong> push as hard as possible and it serves a little under 9 requests per second. But first tokens then take seconds and replies crawl.</li>
+      <li><strong>Capacity within targets:</strong> with first tokens under 1 s and 50 ms per token, it serves about 7.5.</li>
+    </ul>
+    <p>The second number is the one you plan with. It depends on your targets, so write them down before you test. Then test at many load levels, not one.</p>
+    <p class="key"><span>Key idea</span>A benchmark result is "X requests per second <em>at</em> these latency targets". A number without targets isn't useful.</p>
+  </section>
+
+  <section class="step" id="pct">
+    <div class="step-head"><span class="num">2</span><h2>Read percentiles, not averages</h2></div>
+    <p>Lesson 1 named the latency numbers: time to first token (TTFT), time per output token (TPOT), and the gap between tokens (ITL). Add end-to-end latency (E2EL), the whole request.</p>
+    <p>Each one is a spread, not a single value. An average hides the slow tail. Report percentiles instead:</p>
+    <ul>
+      <li><strong>p50</strong> is the typical user.</li>
+      <li><strong>p95</strong> and <strong>p99</strong> are the unlucky 1 in 20 and 1 in 100. That's where queueing shows up first.</li>
+    </ul>
+    <p>In the demo, the p95 line rises well before the median does. <code>vllm bench serve</code> reports only p99 by default. Ask for more with <code>--metric-percentiles 50,95,99</code>.</p>
+    <p class="key"><span>Key idea</span>Set targets on p95 or p99. The median looks fine long after users start to suffer.</p>
+  </section>
+
+  <section class="step" id="rate">
+    <div class="step-head"><span class="num">3</span><h2>Request rate versus concurrency</h2></div>
+    <p>There are two ways to load a server:</p>
+    <figure class="fig">
+      <div class="loop">
+        <div><b>Request rate (open)</b>New requests arrive on a clock, whether or not the server keeps up. Like real users.
+          <div class="tl" aria-hidden="true"><span style="width:14%"></span><span style="width:9%"></span><span style="width:18%"></span><span style="width:7%"></span><span style="width:12%"></span></div></div>
+        <div><b>Concurrency (closed)</b>A fixed number of users. Each sends the next request only after its answer.
+          <div class="tl" aria-hidden="true"><span style="width:30%"></span><span class="gap" style="width:6%"></span><span style="width:30%"></span><span class="gap" style="width:6%"></span></div></div>
+      </div>
+      <figcaption>The two are linked by Little's law: requests in flight = arrival rate × time each request takes. In the demo at 7 requests per second, each chat request takes about 8.4 s, so about 60 are in flight.</figcaption>
+    </figure>
+    <p>The closed style can flatter a server. When it slows down, users wait for answers, so fewer new requests arrive. The vLLM docs warn about this: with a concurrency cap, the real rate can fall below the rate you asked for.</p>
+    <p>Use request rate to find capacity for user-facing traffic. Use concurrency when there really is a fixed number of clients, such as 16 red-team workers. Note that <code>vllm bench serve</code> defaults to an infinite rate: every request at once. That measures maximum throughput, not latency under normal load.</p>
+    <p class="key"><span>Key idea</span>Open load (<code>--request-rate</code>) shows queueing honestly. Closed load (<code>--max-concurrency</code>) fits a fixed set of workers.</p>
+  </section>
+
+  <section class="step" id="curve">
+    <div class="step-head"><span class="num">4</span><h2>The curve and its knee</h2></div>
+    <p>Plot latency against load and you get the shape in the demo. It is flat at first, then bends sharply upward. That bend is the knee: past it, requests arrive faster than they finish, and the queue only grows.</p>
+    <p>Two details in the toy model are worth a second look:</p>
+    <ul>
+      <li>For chat, the per-token target tends to break first. More requests share each step, and prefill chunks join those steps.</li>
+      <li>Long prompts cut capacity hard. Each request has 4 times the prefill work, so first tokens take longer from the start.</li>
+    </ul>
+    <p>Tools can do the sweep for you. GuideLLM's default <code>sweep</code> runs one request at a time, then full speed, then 10 fixed rates in between. With <code>vllm bench serve</code>, run it once per rate, or pass <code>--goodput ttft:1000 tpot:50</code> to count requests that met both targets.</p>
+    <pre class="cmd">guidellm benchmark --target http://localhost:8000 \
+  --rate-type sweep --max-seconds 60 \
+  --data "prompt_tokens=1000,output_tokens=250"</pre>
+    <p class="key"><span>Key idea</span>Find the knee, then stay below it. Your capacity is where the first p95 target breaks.</p>
+  </section>
+
+  <section class="step" id="traps">
+    <div class="step-head"><span class="num">5</span><h2>Traps to avoid</h2></div>
+    <ol class="seq">
+      <li><span><strong>Unrealistic lengths.</strong> Use your real input and output lengths. They decide everything, as the two workloads in the demo show.</span></li>
+      <li><span><strong>Replies that stop early.</strong> With random prompts the model may stop after a few tokens. <code>--ignore-eos</code> makes every reply the length you set.</span></li>
+      <li><span><strong>Wrong prefix sharing.</strong> Random prompts share nothing, so prefix caching never helps. If your traffic shares a system prompt, add it with <code>--random-prefix-len</code>.</span></li>
+      <li><span><strong>No warm-up.</strong> <code>--num-warmups</code> is 0 by default. Send some requests first, and leave them out of the results.</span></li>
+      <li><span><strong>Runs too short.</strong> Past the knee, results depend on how long you run. Use enough requests, such as 1,000 per level.</span></li>
+      <li><span><strong>Missing details.</strong> Record the vLLM version, every flag and the GPU. Without them nobody can repeat the test, including you.</span></li>
+    </ol>
+    <p>A full command for one load level:</p>
+    <pre class="cmd">vllm bench serve \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --dataset-name random \
+  --random-input-len 1000 --random-output-len 250 \
+  --random-prefix-len 2000 --ignore-eos \
+  --request-rate 6 --num-prompts 1000 --num-warmups 50 \
+  --percentile-metrics ttft,tpot,itl,e2el \
+  --metric-percentiles 50,95,99 \
+  --goodput ttft:1000 tpot:50 \
+  --save-result</pre>
+    <p class="key"><span>Key idea</span>A benchmark is only as good as how closely its traffic matches yours.</p>
+  </section>
+
+  <section class="step" id="cost">
+    <div class="step-head"><span class="num">6</span><h2>Cost per million tokens</h2></div>
+    <p>Once you know the throughput at your targets, cost is one formula:</p>
+    <p class="formula">cost per million tokens = GPU price per hour ÷ (tokens per second × 3,600) × 1,000,000</p>
+    <figure class="fig">
+      <p class="fig-title">Try it with the capacity you found above</p>
+      <div class="ctl"><span class="ctl-name" id="prLab">GPU price per hour</span>
+        <div class="range-row"><input type="range" id="price" min="0.5" max="5" step="0.25" value="2" aria-labelledby="prLab"><output id="priceOut" for="price">$2.00</output></div></div>
+      <div class="ctl"><span class="ctl-name" id="buLab">Share of the day the GPU is busy at that load</span><div class="seg" id="buSeg" role="group" aria-labelledby="buLab"></div></div>
+      <p class="mresult" id="costCalc" aria-live="polite"></p>
+      <div class="readouts">
+        <div class="ro"><b id="cOut">$0.30</b><span>per million output tokens</span></div>
+        <div class="ro"><b id="cAll">$0.06</b><span>per million tokens, input included</span></div>
+        <div class="ro"><b id="cDay">$48</b><span>per day for the GPU</span></div>
+      </div>
+      <figcaption>A100 80GB rental prices ranged from about $1.19 to $5.07 per GPU-hour on demand in one recent comparison. Use your own internal rate if you have one.</figcaption>
+    </figure>
+    <p>Three things the calculator shows:</p>
+    <ul>
+      <li><strong>Idle time is expensive.</strong> A GPU busy a quarter of the day costs 4 times as much per token. Autoscaling (Lesson 7) and sharing (Lesson 6) attack this.</li>
+      <li><strong>Say which tokens you count.</strong> Chat requests here read 4 input tokens per output token. API price lists usually show input and output tokens separately.</li>
+      <li><strong>Your targets set the price.</strong> Looser targets allow more load, so each token costs less.</li>
+    </ul>
+    <p>For your 0.3 share, use 0.3 × the GPU price, and measure throughput on the share itself, not a whole card.</p>
+    <p class="key"><span>Key idea</span>Cost per token = price ÷ useful throughput. Raise throughput at your targets, and keep the GPU busy.</p>
+  </section>
+
+  <section class="step" id="writeup">
+    <div class="step-head"><span class="num">7</span><h2>Write it up</h2></div>
+    <p>A one-page template. Fill in every line; the empty ones show what you forgot to test.</p>
+    <dl class="tmpl">
+      <dt>Goal</dt><dd>Most requests/s with p95 TTFT ≤ 1 s and p95 TPOT ≤ 50 ms</dd>
+      <dt>Model</dt><dd>Name and precision (BF16, FP8, INT4)</dd>
+      <dt>Hardware</dt><dd>GPU type and count, or the slice (MIG, share)</dd>
+      <dt>Server</dt><dd>vLLM version and every flag</dd>
+      <dt>Traffic</dt><dd>Input and output lengths, shared prefix, dataset</dd>
+      <dt>Load</dt><dd>Request rates tested, requests per rate, warm-ups</dd>
+      <dt>Client</dt><dd>Where it ran; streaming on or off</dd>
+      <dt>Results</dt><dd>Per rate: TTFT and TPOT p50, p95, p99; output tokens/s; errors</dd>
+      <dt>Answer</dt><dd>Capacity X req/s (Y tokens/s); $Z per million output tokens at $P per GPU-hour</dd>
+      <dt>Limits</dt><dd>What ran out first: KV cache, math, or queue?</dd>
+      <dt>Next</dt><dd>One change to try, and why</dd>
+    </dl>
+    <p class="key"><span>Key idea</span>A benchmark nobody can repeat is an anecdote. Write down everything.</p>
+  </section>
+
+  <section class="step" id="quiz">
+    <div class="step-head plain"><h2>Check yourself</h2></div>
+    <p>Answer each one first, out loud or in chat, then open the answer.</p>
+    <div class="q"><p><span class="qn">1</span>Median TTFT is 0.3 s, but p99 is 4 s. What does that tell you?</p>
+      <details><summary>Show answer</summary><div class="ans">Most users are fine, but 1 in 100 waits 4 seconds or more. That usually means queueing at busy moments, or long prompts holding others up. You are probably near the knee.</div></details></div>
+    <div class="q"><p><span class="qn">2</span>A test with <code>--max-concurrency 32</code> showed great latency. In production, users complain. Why?</p>
+      <details><summary>Show answer</summary><div class="ans">A concurrency cap is closed load: when the server slows, fewer new requests arrive, so the queue never builds. Real users keep arriving. Retest with <code>--request-rate</code> at several rates.</div></details></div>
+    <div class="q"><p><span class="qn">3</span>A GPU costs $2 per hour and gives 1,800 output tokens/s at your targets. What does a million output tokens cost? And if it's busy only a quarter of the day?</p>
+      <details><summary>Show answer</summary><div class="ans">2 ÷ (1,800 × 3,600) × 1,000,000 ≈ $0.31. Busy a quarter of the day: $0.31 ÷ 0.25 ≈ $1.23.</div></details></div>
+    <div class="q"><p><span class="qn">4</span>Your test used random prompts. Production prompts share a 2,000-token system prompt. Which way is your result off?</p>
+      <details><summary>Show answer</summary><div class="ans">Too pessimistic. In production, prefix caching skips most of that shared prefill (Lesson 4), so first tokens come sooner. Add <code>--random-prefix-len 2000</code>, or use real prompts.</div></details></div>
+    <div class="q"><p><span class="qn">5</span>At the same targets, the toy model's capacity drops from about 7.5 to 1.4 requests per second with long prompts. Why?</p>
+      <details><summary>Show answer</summary><div class="ans">Each long request has 4,000 prompt tokens to prefill instead of 1,000. Prefill is math-bound (Lesson 1), so each request costs about 3 to 4 times more GPU time. First tokens also start slower.</div></details></div>
+  </section>
+
+  <section class="step recap" id="next">
+    <div class="step-head plain"><h2>What to remember</h2></div>
+    <ol>
+      <li>The useful result is capacity at your latency targets, not peak throughput.</li>
+      <li>Set targets on p95 or p99; the median hides the tail.</li>
+      <li>Use request rate for user traffic; concurrency caps hide queueing.</li>
+      <li>Sweep the load and find the knee. Stay below it.</li>
+      <li>Match real lengths and prefixes, use <code>--ignore-eos</code>, warm up, record everything.</li>
+      <li>Cost per million tokens = price per hour ÷ (tokens/s × 3,600) × 1,000,000, adjusted for idle time.</li>
+    </ol>
+    <p style="margin-top:14px"><a href="https://claude.ai/artifact/BiKCvaaG54E7RXHftZdQje">Back to Lesson 7</a></p>
+  </section>
+
+  <section class="step" id="track">
+    <div class="step-head plain"><h2>The whole track</h2></div>
+    <p>You've finished the inference track. Here it is in one list, to review before an interview.</p>
+    <ol class="track-list">
+      <li><div><a href="https://claude.ai/artifact/USZqxTneUzroaqdQZYrx37">How an LLM answers a prompt</a><span>Prefill and decode, TTFT and TPOT, the memory-speed limit</span></div></li>
+      <li><div><a href="https://claude.ai/artifact/7jBvi95ykBeCHw6HDrrRrP">How many tokens fit on your GPU?</a><span>KV cache size, GQA, vLLM's memory budget</span></div></li>
+      <li><div><a href="https://claude.ai/artifact/4Nj8k5bGo7u6JcVmTAFwtj">How vLLM packs many requests onto one GPU</a><span>Continuous batching, PagedAttention, preemption</span></div></li>
+      <li><div><a href="https://claude.ai/artifact/4X7ppjDXD2CJ28WjeJq8MS">Don't compute the same prompt twice</a><span>Prefix caching and chunked prefill</span></div></li>
+      <li><div><a href="https://claude.ai/artifact/EVM9BQ9JuJfBjvBiwY1UHD">Making every token cheaper</a><span>Quantization and speculative decoding</span></div></li>
+      <li><div><a href="https://claude.ai/artifact/NzSi3BVZim2ETkfvjtpwPf">One GPU is rarely the right size</a><span>Tensor and pipeline parallel, MIG and time-slicing</span></div></li>
+      <li><div><a href="https://claude.ai/artifact/BiKCvaaG54E7RXHftZdQje">From one server to a service</a><span>KServe, llm-d routing, autoscaling, cold starts</span></div></li>
+      <li><div>Measure it, then price it<span>Benchmarks, percentiles, capacity and cost (this lesson)</span></div></li>
+    </ol>
+  </section>
+
+  <footer class="sources">
+    Sources
+    <ul>
+      <li><a href="https://docs.vllm.ai/en/v0.32.0/cli/bench/serve/">vLLM docs: vllm bench serve</a>: request rate (default infinite, Poisson), burstiness, concurrency cap warning, percentile defaults, goodput, ignore-eos, warm-ups, prefix length</li>
+      <li><a href="https://pypi.org/project/guidellm/">GuideLLM</a> and <a href="https://github.com/vllm-project/guidellm">its GitHub page</a>: load profiles, the default sweep</li>
+      <li><a href="https://www.beam.cloud/blog/nvidia-a100-80gb-pricing">Beam: A100 80GB pricing</a>: $1.19 to $5.07 per GPU-hour on demand</li>
+      <li>Toy model numbers come from Lessons 1 and 2: A100 80GB SXM memory speed 2,039 GB/s, 312 TFLOPS 16-bit math, 128 KiB of KV cache per token for Llama 3.1 8B</li>
+    </ul>
+  </footer>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n, d = 0) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+(function () { const prog = $('#prog'); if (!prog) return; const onScroll = () => { const h = document.documentElement; const max = h.scrollHeight - h.clientHeight; prog.style.width = (max > 0 ? h.scrollTop / max * 100 : 0) + '%'; }; window.addEventListener('scroll', onScroll, { passive: true }); onScroll(); })();
+function seg(host, items, obj, key, cb, label) {
+  const btns = items.map((it, i) => {
+    const b = el('button', null, label ? label(it) : it.name); b.type = 'button';
+    b.setAttribute('aria-pressed', String(i === obj[key]));
+    b.addEventListener('click', () => { obj[key] = i; sync(); cb(); });
+    host.appendChild(b); return b;
+  });
+  function sync() { btns.forEach((x, j) => x.setAttribute('aria-pressed', String(j === obj[key]))); }
+  return sync;
+}
+function bars(host, rows, scale) {
+  host.innerHTML = '';
+  rows.forEach((r) => {
+    const row = el('div', 'row');
+    const lab = el('div', 'lab'); lab.appendChild(el('span', null, r.name)); lab.appendChild(el('b', null, r.text));
+    const tr = el('div', 'track'); const f = el('div', 'fill' + (r.cls ? ' ' + r.cls : '')); f.style.width = (Math.min(1, r.v / scale) * 100) + '%';
+    tr.appendChild(f); row.appendChild(lab); row.appendChild(tr); host.appendChild(row);
+  });
+}
+
+(function () {
+  /* ---------- Toy serving model ---------- */
+  function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  const P = { W: 16.06e9, BW: 0.8 * 2039e9, FL: 0.6 * 312e12, FPT: 2 * 8.03e9, KVB: 131072, KVCAP: 404000, MAXSEQ: 256, BUDGET: 2048 };
+  function run(rate, inLen, outLen, n) {
+    const r = rng(7); let t = 0; const reqs = [];
+    for (let i = 0; i < n; i++) { t += -Math.log(1 - r()) / rate; reqs.push({ a: t, pre: 0, out: 0, first: null, done: null }); }
+    const sc = (n / rate) / t; reqs.forEach((q) => { q.a *= sc; });
+    let now = 0, next = 0, kvUsed = 0, finished = 0; const waiting = [], running = [];
+    while (finished < n) {
+      while (next < n && reqs[next].a <= now) { waiting.push(reqs[next]); next++; }
+      if (!running.length && !waiting.length) { now = reqs[next].a; continue; }
+      while (waiting.length && running.length < P.MAXSEQ && kvUsed + inLen + outLen <= P.KVCAP) { running.push(waiting.shift()); kvUsed += inLen + outLen; }
+      let budget = P.BUDGET, tokens = 0, bytes = P.W; const prog = [];
+      for (const q of running) if (q.pre >= inLen && budget > 0) { budget--; tokens++; bytes += (inLen + q.out) * P.KVB; prog.push([q, 0, 1]); }
+      for (const q of running) if (q.pre < inLen && budget > 0) { const c = Math.min(budget, inLen - q.pre); budget -= c; tokens += c; bytes += (q.pre + c) * P.KVB; prog.push([q, 1, c]); }
+      now += Math.max(bytes / P.BW, tokens * P.FPT / P.FL);
+      for (const [q, k, c] of prog) {
+        if (k === 1) { q.pre += c; if (q.pre >= inLen) { q.first = now; q.out = 1; } } else q.out++;
+        if (q.out >= outLen && q.done == null && q.pre >= inLen) { q.done = now; finished++; kvUsed -= inLen + outLen; }
+      }
+      for (let i = running.length - 1; i >= 0; i--) if (running[i].done != null) running.splice(i, 1);
+    }
+    const ttft = reqs.map((q) => q.first - q.a).sort((a, b) => a - b), tpot = reqs.map((q) => (q.done - q.first) / (outLen - 1)).sort((a, b) => a - b);
+    const pct = (a, p) => a[Math.min(a.length - 1, Math.floor(p / 100 * a.length))];
+    const fin = reqs.map((q) => q.done).sort((x, y) => x - y), i1 = Math.floor(n * 0.1), i2 = Math.floor(n * 0.9);
+    return { rate, t50: pct(ttft, 50), t95: pct(ttft, 95), p50: pct(tpot, 50), p95: pct(tpot, 95), tok: (i2 - i1) * outLen / (fin[i2] - fin[i1]) };
+  }
+  const WL = [
+    { name: 'Chat: 1,000 in, 250 out', short: 'Chat', inL: 1000, outL: 250, rates: Array.from({ length: 20 }, (_, i) => 0.5 * (i + 1)) },
+    { name: 'Long prompts: 4,000 in, 250 out', short: 'Long prompts', inL: 4000, outL: 250, rates: Array.from({ length: 12 }, (_, i) => 0.25 * (i + 1)) }
+  ];
+  WL.forEach((w) => { w.rows = null; });
+  function rowsOf(w) { if (!w.rows) w.rows = w.rates.map((rt) => run(rt, w.inL, w.outL, 1000)); return w.rows; }
+  const TT = [{ name: '0.5 s', v: 0.5 }, { name: '1 s', v: 1 }, { name: '2 s', v: 2 }];
+  const TP = [{ name: '25 ms', v: 0.025 }, { name: '50 ms', v: 0.05 }, { name: '100 ms', v: 0.1 }];
+  const hs = { w: 0, tt: 1, tp: 1 };
+  seg($('#wSeg'), WL, hs, 'w', renderH); seg($('#ttSeg'), TT, hs, 'tt', renderH); seg($('#tpSeg'), TP, hs, 'tp', renderH);
+  function capOf(rows, key, target) {
+    if (rows[0][key] > target) return 0;
+    for (let i = 1; i < rows.length; i++) if (rows[i][key] > target) { const a = rows[i - 1], b = rows[i]; return a.rate + (b.rate - a.rate) * (target - a[key]) / (b[key] - a[key]); }
+    return rows[rows.length - 1].rate;
+  }
+  const NS = 'http://www.w3.org/2000/svg';
+  function sv(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+  const L = 48, R = 332;
+  let state = null;
+  function drawChart(svg, rows, k50, k95, target, lo, hi, ticks, tfmt, cap, xmax, showX, bottom) {
+    svg.innerHTML = '';
+    const T = 8, B = bottom, ly = (v) => B - (Math.log10(Math.max(lo, Math.min(hi, v))) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)) * (B - T);
+    const xOf = (r) => L + r / xmax * (R - L);
+    sv('rect', { class: 'over', x: L, y: T, width: R - L, height: Math.max(0, ly(target) - T) }, svg);
+    ticks.forEach((v) => { sv('line', { class: 'gl', x1: L, x2: R, y1: ly(v), y2: ly(v) }, svg); const tx = sv('text', { x: L - 5, y: ly(v) + 3, 'text-anchor': 'end' }, svg); tx.textContent = tfmt(v); });
+    sv('line', { class: 'slo', x1: L, x2: R, y1: ly(target), y2: ly(target) }, svg);
+    if (cap > 0) sv('line', { class: 'capl', x1: xOf(cap), x2: xOf(cap), y1: T, y2: B }, svg);
+    [[k50, 'p50', 'dot50'], [k95, 'p95', 'dot95']].forEach(([k, cls, dot]) => {
+      sv('path', { class: cls, d: rows.map((r, i) => (i ? 'L' : 'M') + xOf(r.rate) + ',' + ly(r[k])).join('') }, svg);
+      rows.forEach((r) => sv('circle', { class: dot, cx: xOf(r.rate), cy: ly(r[k]), r: 2.6 }, svg));
+    });
+    if (showX) {
+      const step = xmax > 5 ? 2 : 0.5;
+      for (let v = 0; v <= xmax + 1e-9; v += step) { const tx = sv('text', { x: xOf(v), y: B + 13, 'text-anchor': v === 0 ? 'start' : 'middle' }, svg); tx.textContent = fmt(v, step < 1 ? 1 : 0); }
+      const tl = sv('text', { x: R, y: B + 26, 'text-anchor': 'end' }, svg); tl.textContent = 'requests per second';
+    }
+    const cur = sv('line', { class: 'cur', x1: -10, x2: -10, y1: T, y2: B }, svg);
+    return { xOf, cur };
+  }
+  function renderH() {
+    const w = WL[hs.w], rows = rowsOf(w), tt = TT[hs.tt].v, tp = TP[hs.tp].v;
+    const capT = capOf(rows, 't95', tt), capP = capOf(rows, 'p95', tp), cap = Math.min(capT, capP);
+    const xmax = w.rates[w.rates.length - 1];
+    const a = drawChart($('#cT'), rows, 't50', 't95', tt, 0.05, 50, [0.1, 1, 10], (v) => v < 1 ? fmt(v, 1) + ' s' : fmt(v) + ' s', cap, xmax, false, 120);
+    const b = drawChart($('#cP'), rows, 'p50', 'p95', tp, 0.005, 0.3, [0.01, 0.03, 0.1, 0.3], (v) => fmt(v * 1000) + ' ms', cap, xmax, true, 112);
+    state = { rows, xmax, xOf: a.xOf, curs: [a.cur, b.cur], w };
+    const tok = cap * w.outL;
+    $('#hCap').textContent = cap > 0 ? fmt(cap, 1) : '0';
+    $('#hTok').textContent = cap > 0 ? fmt(Math.round(tok)) : '0';
+    $('#hCost').textContent = cap > 0 ? '$' + fmt(2 / (tok * 3600) * 1e6, 2) : 'n/a';
+    const which = capT < capP ? 'first-token target' : capP < capT ? 'per-token target' : 'both targets';
+    $('#hOut').innerHTML = cap > 0 ? '<b>' + w.short + ': about ' + fmt(cap, 1) + ' requests/s.</b> The ' + which + ' breaks first. Touch the charts to read each load level.' : '<b>No load level meets these targets.</b> Even at ' + fmt(w.rates[0], 2) + ' requests/s, p95 is over target.';
+    $('#cT').setAttribute('aria-label', w.short + ': capacity ' + fmt(cap, 1) + ' requests per second within targets');
+    hcost.tok = tok; hcost.ratio = w.inL / w.outL; renderC();
+  }
+  function scrub(ev) {
+    if (!state) return;
+    const svg = ev.currentTarget, r = svg.getBoundingClientRect();
+    const x = (ev.clientX - r.left) / r.width * 340;
+    let best = state.rows[0], bd = 1e9; state.rows.forEach((row) => { const d = Math.abs(state.xOf(row.rate) - x); if (d < bd) { bd = d; best = row; } });
+    state.curs.forEach((c) => { c.setAttribute('x1', state.xOf(best.rate)); c.setAttribute('x2', state.xOf(best.rate)); });
+    const s = (v) => v < 10 ? fmt(v, 2) + ' s' : fmt(v, 0) + ' s';
+    $('#hOut').textContent = 'At ' + fmt(best.rate, 2) + ' requests/s: first token p50 ' + s(best.t50) + ', p95 ' + s(best.t95) + '. Per token p50 ' + fmt(best.p50 * 1000) + ' ms, p95 ' + fmt(best.p95 * 1000) + ' ms. ' + fmt(Math.round(best.tok)) + ' output tokens/s.';
+  }
+  ['#cT', '#cP'].forEach((s) => { const e = $(s); e.addEventListener('pointermove', scrub); e.addEventListener('pointerdown', scrub); });
+
+  /* ---------- Step 6: cost ---------- */
+  const BU = [{ name: '100%', v: 1 }, { name: '50%', v: 0.5 }, { name: '25%', v: 0.25 }];
+  const hcost = { b: 0, tok: 0, ratio: 4 };
+  seg($('#buSeg'), BU, hcost, 'b', renderC);
+  $('#price').addEventListener('input', renderC);
+  function renderC() {
+    const price = parseFloat($('#price').value), busy = BU[hcost.b].v, tok = hcost.tok;
+    $('#priceOut').textContent = '$' + fmt(price, 2);
+    $('#cDay').textContent = '$' + fmt(price * 24);
+    if (!(tok > 0)) { $('#cOut').textContent = 'n/a'; $('#cAll').textContent = 'n/a'; $('#costCalc').textContent = 'No load level met the targets above, so there is no throughput to price. Loosen the targets.'; return; }
+    const out = price / (tok * 3600 * busy) * 1e6, all = price / (tok * (1 + hcost.ratio) * 3600 * busy) * 1e6;
+    $('#cOut').textContent = '$' + fmt(out, 2); $('#cAll').textContent = '$' + fmt(all, 2);
+    $('#costCalc').textContent = '$' + fmt(price, 2) + ' ÷ (' + fmt(Math.round(tok)) + ' tokens/s × 3,600' + (busy < 1 ? ' × ' + BU[hcost.b].name + ' busy' : '') + ') × 1,000,000 = $' + fmt(out, 2) + ' per million output tokens';
+  }
+  renderH();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>From One Server to a Service</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+
+
+:root {
+  /* Layout: same system as Lesson 1. One reading column (max 680px); each step = numbered heading, prose, one framed figure, one key idea.
+     Colour carries meaning: violet = model weights, teal = KV cache (decode memory), grey = overhead, hatched = held back. Amber stays prefill. */
+  --paper: #F4F6F9;
+  --band: #E8ECF2;
+  --surface: #FFFFFF;
+  --ink: #172036;
+  --muted: #586178;
+  --rule: #DCE1EA;
+  --prefill: #C27C0E;
+  --decode: #0088A3;
+  --decode-tint: #DBEEF2;
+  --weights: #7B5BD6;
+  --weights-tint: #EAE4FA;
+  --over: #A3ABB9;
+  --off: #B9C0CC;
+  --tok-a: #E3E8F0;
+  --tok-b: #D3DBE7;
+  --bad: #B42318;
+  --bad-tint: #FCE9E7;
+  --good: #1F7A4A;
+  --good-tint: #E3F3EA;
+  --display: 'Bricolage Grotesque', 'Avenir Next', system-ui, sans-serif;
+  --body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+    --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+    --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+    --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+  --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+  --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+  --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition: none !important; animation: none !important; } }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--body); font-size: 17px; line-height: 1.6; -webkit-text-size-adjust: 100%; }
+a { color: var(--decode); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--decode); outline-offset: 2px; border-radius: 4px; }
+.progress { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 10; }
+.progress span { display: block; height: 100%; width: 0; background: var(--decode); }
+.wrap { max-width: 680px; margin: 0 auto; padding: 0 20px; }
+
+/* Hero */
+.hero { background: var(--band); padding: 40px 0 32px; border-bottom: 1px solid var(--rule); }
+.kicker { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; }
+.kicker a { color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 800; font-size: clamp(2.2rem, 9vw, 3.4rem); line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 14px; text-wrap: balance; }
+h1 .t { border-radius: 6px; padding: 0 0.06em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+h1 .t:nth-child(odd) { background: var(--tok-a); }
+h1 .t:nth-child(even) { background: var(--tok-b); }
+.lede { font-size: 1.08rem; margin: 0 0 22px; max-width: 34em; }
+
+.demo { background: var(--surface); border: 1.5px solid var(--ink); border-radius: 16px; padding: 18px 16px 16px; }
+.demo-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 10px; }
+
+/* Memory bar */
+.mem { display: flex; height: 44px; border-radius: 8px; overflow: hidden; border: 1px solid var(--rule); background: var(--surface); }
+.mem > div { position: relative; min-width: 0; display: flex; align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 600; white-space: nowrap; overflow: hidden; transition: flex-basis .3s ease; }
+.mem .w { background: var(--weights); color: #fff; }
+.mem .o { background: var(--over); }
+.mem .k { background: var(--decode-tint); color: var(--ink); justify-content: flex-start; }
+.mem .k .kfill { position: absolute; inset: 0 auto 0 0; width: 100%; background: var(--decode); transition: width .25s linear; }
+.mem .k span { position: relative; padding-left: 8px; color: #fff; text-shadow: 0 0 2px rgba(0,0,0,.25); }
+.mem .h { background: repeating-linear-gradient(135deg, var(--off) 0 3px, transparent 3px 7px); color: var(--muted); }
+.mem-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 8px; }
+.mem-legend b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+.sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+.sw.w { background: var(--weights); } .sw.o { background: var(--over); } .sw.k { background: var(--decode); }
+.sw.h { background: repeating-linear-gradient(135deg, var(--off) 0 2px, transparent 2px 4px); box-shadow: inset 0 0 0 1px var(--off); }
+.sw.kv { background: var(--decode); } .sw.vv { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+
+.users { display: grid; grid-template-columns: repeat(auto-fill, minmax(13px, 1fr)); gap: 4px; margin: 14px 0 6px; }
+.u { aspect-ratio: 1; border-radius: 50%; border: 1.5px solid var(--rule); background: transparent; transition: background-color .15s, border-color .15s; }
+.u.on { background: var(--decode); border-color: var(--decode); }
+.u.wait { border: 2px dashed var(--bad); }
+.demo-stats { display: flex; justify-content: space-between; gap: 8px; font-size: 0.82rem; color: var(--muted); }
+.demo-stats b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.demo-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-top: 12px; }
+.status { font-size: 0.92rem; min-height: 3em; margin: 0; flex: 1 1 260px; }
+@media (max-width: 480px) { .status { min-height: 4.6em; } }
+
+button, .seg button { font: inherit; font-size: 0.92rem; font-weight: 500; color: var(--ink); cursor: pointer; background: var(--surface); border: 1.5px solid var(--ink); border-radius: 999px; padding: 7px 16px; }
+button:hover { background: var(--band); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--ink); color: var(--paper); }
+button.primary:hover { opacity: .9; background: var(--ink); }
+
+.toc { padding: 26px 0 6px; }
+.toc h2 { font-family: var(--display); font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.toc ol { margin: 0; padding-left: 1.4em; columns: 2; column-gap: 28px; font-size: 0.95rem; }
+.toc li { break-inside: avoid; margin: 2px 0; }
+@media (max-width: 480px) { .toc ol { columns: 1; } }
+
+section.step { padding: 36px 0 8px; scroll-margin-top: 12px; }
+.step-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.step-head.plain { border-top: 2px solid var(--ink); padding-top: 14px; }
+.num { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--ink); display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 1.05rem; }
+h2 { font-family: var(--display); font-weight: 800; font-size: 1.6rem; line-height: 1.2; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h3 { font-family: var(--display); font-weight: 600; font-size: 1.1rem; margin: 22px 0 6px; }
+p { margin: 0 0 14px; }
+.key { border-left: 3px solid var(--ink); padding: 2px 0 2px 14px; margin: 18px 0 8px; font-weight: 500; }
+.key span { display: block; font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+figure { margin: 18px 0; }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 16px; }
+figcaption { font-size: 0.86rem; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+.fig-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 12px; }
+.note { font-size: 0.8rem; color: var(--muted); }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--band); border-radius: 4px; padding: 0 4px; }
+
+.chip { font-family: var(--mono); font-size: 0.84rem; line-height: 1.5; white-space: pre; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink); display: inline-block; }
+.chip.d { background: var(--decode-tint); border-color: var(--decode); }
+
+
+/* Controls */
+.controls { display: grid; gap: 14px; margin-bottom: 16px; }
+.ctl label, .ctl .ctl-name { display: block; font-size: 0.84rem; color: var(--muted); margin-bottom: 5px; }
+.ctl output { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { padding: 5px 13px; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+input[type=range] { width: 100%; accent-color: var(--decode); height: 28px; margin: 0; }
+.readouts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 4px 0 14px; }
+.ro { background: var(--paper); border-radius: 10px; padding: 10px 10px 8px; }
+.ro b { display: block; font-family: var(--display); font-weight: 800; font-size: 1.4rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ro span { display: block; font-size: 0.76rem; color: var(--muted); line-height: 1.3; margin-top: 3px; }
+@media (max-width: 400px) { .ro b { font-size: 1.15rem; } }
+
+/* Sequence list */
+.seq { list-style: none; counter-reset: s; padding: 0; margin: 0 0 16px; display: grid; gap: 10px; }
+.seq li { counter-increment: s; display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
+.seq li::before { content: counter(s); display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--band); font-family: var(--display); font-weight: 800; font-size: 0.85rem; }
+
+/* Log card */
+.log { font-family: var(--mono); font-size: 0.78rem; line-height: 1.55; background: var(--band); border-radius: 10px; padding: 12px 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0 0; }
+.log .i { color: var(--muted); }
+.log .e { color: var(--bad); }
+.log b { font-weight: 500; color: var(--ink); }
+
+/* Quiz */
+.q { border-top: 1px solid var(--rule); padding: 14px 0 6px; }
+.q p { margin: 0 0 8px; font-weight: 500; }
+.q p .qn { font-family: var(--display); font-weight: 800; margin-right: 6px; }
+details summary { cursor: pointer; color: var(--decode); font-weight: 500; font-size: 0.92rem; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "+"; display: inline-block; width: 1em; font-weight: 600; }
+details[open] summary::before { content: "\2212"; }
+details .ans { margin: 8px 0 10px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; font-size: 0.95rem; }
+.recap ol { padding-left: 1.3em; margin: 0 0 14px; }
+.recap li { margin: 4px 0; }
+.next { background: var(--band); border-radius: 14px; padding: 18px; margin: 18px 0 8px; }
+.next b { font-family: var(--display); font-size: 1.15rem; display: block; margin-bottom: 4px; }
+.sources { font-size: 0.82rem; color: var(--muted); padding: 24px 0 48px; }
+.sources ul { padding-left: 1.1em; margin: 6px 0 0; }
+.sources a { color: var(--muted); }
+
+/* Lesson 4 */
+.words { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 14px 16px; margin: 6px 0 0; }
+.words h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.words dl { margin: 0; display: grid; grid-template-columns: 124px 1fr; gap: 6px 12px; font-size: 0.92rem; }
+.words dt { font-weight: 600; }
+.words dd { margin: 0; }
+@media (max-width: 400px) { .words dl { grid-template-columns: 1fr; gap: 0; } .words dd { margin-bottom: 8px; } }
+
+.track { position: relative; height: 16px; border-radius: 4px; background-image: linear-gradient(to right, var(--rule) 1px, transparent 1px); background-size: 25% 100%; }
+.fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; min-width: 2px; transition: width .3s ease; background: var(--decode); }
+.fill.muted { background: var(--off); }
+.hbars .row { margin: 8px 0; }
+.hbars .lab { display: flex; justify-content: space-between; gap: 8px; font-size: 0.86rem; margin-bottom: 3px; }
+.hbars .lab b { font-variant-numeric: tabular-nums; }
+
+/* Hero request bars */
+.panels { display: grid; gap: 14px; }
+.panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 0.86rem; margin-bottom: 5px; }
+.panel-head b { font-weight: 600; }
+.panel-head span { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.panel-head span strong { color: var(--ink); }
+.reqs { display: grid; gap: 3px; }
+.rq { display: flex; height: 16px; border-radius: 4px; overflow: hidden; gap: 2px; transition: opacity .25s; }
+.rq.off { opacity: 0; }
+.rq .s, .rq .own { height: 100%; }
+.rq .s { flex: 2048; }
+.rq .own { flex: 256; background: var(--prefill); }
+.rq .s.calc { background: var(--prefill); }
+.rq .s.hit { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.leg { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 10px; }
+.sw.calc { background: var(--prefill); } .sw.hit { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); } .sw.dec { background: var(--decode); }
+
+/* Block matcher */
+.scen { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.scen button { font-size: 0.84rem; padding: 5px 12px; }
+.scen button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.mrow { margin-bottom: 12px; }
+.mrow .who { font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; }
+.mrow .who span { font-weight: 400; color: var(--muted); }
+.mblocks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.mb { border-radius: 8px; padding: 5px 6px 6px; border: 1.5px solid var(--rule); background: var(--surface); min-height: 74px; display: grid; grid-template-rows: auto 1fr auto; gap: 3px; }
+.mb .fp { font-family: var(--mono); font-size: 0.68rem; color: var(--muted); }
+.mb .toks { display: flex; flex-wrap: wrap; gap: 2px 4px; align-content: start; font-family: var(--mono); font-size: 0.74rem; line-height: 1.35; }
+.mb .toks i { font-style: normal; }
+.mb .toks i.diff { color: var(--bad); font-weight: 600; text-decoration: underline; }
+.mb .st { font-size: 0.7rem; font-weight: 600; }
+.mb.cached { border-color: var(--decode); }
+.mb.hit { background: var(--decode-tint); border-color: var(--decode); }
+.mb.hit .st { color: var(--ink); }
+.mb.miss { background: var(--surface); border-color: var(--prefill); box-shadow: inset 0 0 0 1px var(--prefill); }
+.mb.miss .st { color: var(--prefill); }
+.mresult { font-size: 0.92rem; background: var(--paper); border-radius: 10px; padding: 8px 12px; margin-top: 4px; }
+
+/* Order compare */
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 480px) { .two { grid-template-columns: 1fr; } }
+.tpl { border-radius: 12px; padding: 12px; background: var(--surface); border: 1px solid var(--rule); }
+.tpl h4 { margin: 0 0 8px; font-size: 0.9rem; }
+.tpl.bad { box-shadow: inset 3px 0 0 var(--bad); }
+.tpl.good { box-shadow: inset 3px 0 0 var(--good); }
+.tpl ol { margin: 0; padding-left: 1.2em; font-size: 0.88rem; }
+.tpl li { margin: 3px 0; }
+.tpl .var { color: var(--bad); font-weight: 600; }
+.tpl .fixed { color: var(--ink); }
+.tpl p { margin: 8px 0 0; font-size: 0.84rem; color: var(--muted); }
+
+/* Free list */
+.freeq { display: flex; flex-wrap: wrap; gap: 4px; align-items: stretch; }
+.fq { flex: 0 0 auto; min-width: 58px; border-radius: 8px; padding: 6px 8px; font-size: 0.74rem; background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.fq b { display: block; font-family: var(--mono); font-size: 0.78rem; }
+.fq.lru { box-shadow: inset 0 0 0 2px var(--bad); }
+.fq.hit { background: var(--decode); color: #fff; box-shadow: none; }
+.fq-ends { display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--muted); margin-top: 6px; }
+
+/* Timeline */
+.tl { display: flex; height: 30px; gap: 1px; border-radius: 6px; overflow: hidden; margin: 8px 0 4px; }
+.tl div { min-width: 1px; }
+.tl .dp { background: var(--decode); }
+.tl .mp { background: var(--prefill); }
+.tl-ends { display: flex; justify-content: space-between; font-size: 0.76rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.levers { list-style: none; margin: 0; padding: 0; }
+.levers li { padding: 12px 0 12px 12px; border-bottom: 1px solid var(--rule); box-shadow: inset 3px 0 0 var(--decode); }
+.levers li:last-child { border-bottom: 0; }
+.levers .flag { font-family: var(--mono); font-size: 0.86rem; font-weight: 500; display: block; margin-bottom: 2px; }
+.levers p { margin: 0; font-size: 0.95rem; }
+.levers .cost { display: block; font-size: 0.84rem; color: var(--muted); margin-top: 3px; }
+.callout { background: var(--band); border-radius: 14px; padding: 16px; margin: 18px 0; }
+.callout b.h { font-family: var(--display); font-size: 1.1rem; display: block; margin-bottom: 6px; }
+.callout ul { margin: 0; padding-left: 1.1em; }
+.callout li { margin: 5px 0; }
+.warnbox { border-radius: 12px; padding: 12px 14px; background: var(--bad-tint); box-shadow: inset 3px 0 0 var(--bad); margin: 14px 0; font-size: 0.95rem; }
+.formula { font-family: var(--display); font-weight: 600; font-size: 1.05rem; text-align: center; background: var(--surface); border: 1px dashed var(--muted); border-radius: 12px; padding: 14px 12px; margin: 16px 0; }
+.mresult { font-size: 0.92rem; background: var(--paper); border-radius: 10px; padding: 8px 12px; margin-top: 4px; }
+
+/* Lesson 7 */
+main p code, main li code, main td code { white-space: nowrap; }
+.copies { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 12px 0 6px; }
+.copy { background: var(--surface); border: 1.5px solid var(--rule); border-radius: 10px; padding: 8px; }
+.copy h4 { margin: 0 0 6px; font-size: 0.76rem; font-weight: 600; display: flex; justify-content: space-between; color: var(--ink); }
+.copy h4 span { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.slots { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; }
+.slot { height: 22px; border-radius: 4px; background: var(--band); font-family: var(--mono); font-size: 0.62rem; display: grid; place-items: center; color: var(--ink); font-variant-numeric: tabular-nums; transition: background .25s; }
+.slot.hit { background: var(--decode); color: #fff; transition: none; }
+.slot.miss { background: var(--prefill); color: #fff; transition: none; }
+.leg3 { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.78rem; color: var(--muted); }
+.leg3 i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+
+.path { display: grid; gap: 6px; font-size: 0.84rem; }
+.path .box { border-radius: 10px; padding: 9px 11px; background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--rule); }
+.path .box b { display: block; font-size: 0.86rem; }
+.path .box span { color: var(--muted); font-size: 0.8rem; }
+.path .box.epp { box-shadow: inset 0 0 0 1.5px var(--decode); background: var(--decode-tint); }
+.path .arr { text-align: center; color: var(--muted); font-size: 0.8rem; line-height: 1; }
+.path .pods { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.path .pods div { border-radius: 8px; padding: 7px 4px; text-align: center; font-size: 0.76rem; background: var(--weights-tint); box-shadow: inset 0 0 0 1px var(--weights); }
+.path .pods div.pick { background: var(--weights); color: #fff; font-weight: 600; }
+
+.chart { width: 100%; display: block; touch-action: pan-y; }
+.chart text { font-family: var(--body); font-size: 10px; fill: var(--muted); }
+.chart .gl { stroke: var(--rule); stroke-width: 1; }
+.chart .need { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.chart .spec { fill: var(--decode-tint); stroke: none; }
+.chart .ready { fill: var(--decode); stroke: none; }
+.chart .wait { fill: var(--prefill); stroke: none; }
+.chart .cur { stroke: var(--ink); stroke-width: 1; }
+.chart-lab { font-size: 0.8rem; font-weight: 600; margin: 10px 0 2px; }
+.scrub-out { font-size: 0.84rem; min-height: 2.8em; margin: 6px 0 0; }
+
+table.cmp { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.cmp th, .cmp td { text-align: left; padding: 8px 8px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.cmp th { font-weight: 600; }
+.cmp td:first-child { color: var(--muted); width: 26%; }
+
+.pd { display: grid; grid-template-columns: 1fr 34px 1fr; gap: 6px; align-items: stretch; font-size: 0.8rem; }
+.pd .side { border-radius: 10px; padding: 10px; text-align: center; }
+.pd .side b { display: block; font-size: 0.88rem; margin-bottom: 3px; }
+.pd .p { background: color-mix(in srgb, var(--prefill) 18%, var(--surface)); box-shadow: inset 0 0 0 1.5px var(--prefill); }
+.pd .d { background: var(--decode-tint); box-shadow: inset 0 0 0 1.5px var(--decode); }
+.pd .mid { display: grid; place-items: center; font-size: 1.2rem; color: var(--muted); }
+.pd-note { text-align: center; font-size: 0.78rem; color: var(--muted); margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="progress" aria-hidden="true"><span id="prog"></span></div>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="kicker"><span>Inference track, lesson 7 of 8</span><a href="https://claude.ai/artifact/8m8maPTnDHsbPQWnqjz1bA">Back to your prep plan</a></p>
+    <h1 aria-label="From one server to a service"><span class="t">From</span><span class="t"> one</span><span class="t"> server</span><span class="t"> to</span><span class="t"> a</span><span class="t"> service</span></h1>
+    <p class="lede">Real traffic needs several copies of the model. It needs a front door that picks the right copy, and something that adds copies as traffic grows. This lesson covers all three on Kubernetes.</p>
+
+    <div class="demo">
+      <p class="demo-title">Try it: send 1,200 chat requests to several copies of a model</p>
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="rmLab">How requests are sent</span><div class="seg" id="rmSeg" role="group" aria-labelledby="rmLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="rcLab">Copies</span><div class="seg" id="rcSeg" role="group" aria-labelledby="rcLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="rgLab">Different system prompts in use</span><div class="seg" id="rgSeg" role="group" aria-labelledby="rgLab"></div></div>
+      </div>
+      <div class="copies" id="copies" role="img" aria-label="What each copy holds in its prefix cache"></div>
+      <div class="leg3"><span><i style="background:var(--decode)"></i>found in cache (hit)</span><span><i style="background:var(--prefill)"></i>not found, prefill again (miss)</span></div>
+      <div class="readouts" style="margin-top:12px">
+        <div class="ro"><b id="hRR">36%</b><span>hit rate, round-robin</span></div>
+        <div class="ro"><b id="hCA">97%</b><span>hit rate, cache-aware</span></div>
+        <div class="ro"><b id="hHold">32 vs 8</b><span>prompts each copy must hold</span></div>
+      </div>
+      <div class="demo-foot">
+        <p class="status" id="rStatus" aria-live="polite"></p>
+        <button class="primary" id="rPlay" type="button">Send the requests</button>
+      </div>
+      <p class="note" style="margin:10px 0 0">Each copy's prefix cache fits 12 long prompts (Lesson 4). Each request uses one prompt, picked at random. Cache-aware routing here always sends a prompt to the same copy.</p>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="words" aria-labelledby="wordsH">
+    <h2 id="wordsH">Words used in this lesson</h2>
+    <dl>
+      <dt>Replica</dt><dd>One complete copy of the model, in its own pod.</dd>
+      <dt>Round-robin</dt><dd>Sending requests to copies in turn: 1, 2, 3, 1, 2, 3.</dd>
+      <dt>Endpoint picker (EPP)</dt><dd>A small service that chooses which copy gets each request.</dd>
+      <dt>Autoscaler</dt><dd>A controller that adds or removes copies based on a signal.</dd>
+      <dt>HPA, KEDA</dt><dd>Kubernetes' built-in autoscaler, and an add-on that feeds it outside signals such as Prometheus metrics.</dd>
+      <dt>Cold start</dt><dd>The time a new copy needs before it can answer.</dd>
+      <dt>Scale to zero</dt><dd>Removing every copy when there is no traffic.</dd>
+      <dt>P/D disaggregation</dt><dd>Running prefill and decode on different GPUs.</dd>
+    </dl>
+  </section>
+
+  <nav class="toc" aria-label="Lesson steps">
+    <h2>In this lesson</h2>
+    <ol>
+      <li><a href="#layers">Three layers</a></li>
+      <li><a href="#kserve">KServe: deploying the model</a></li>
+      <li><a href="#route">Routing that knows the cache</a></li>
+      <li><a href="#scale">What to scale on</a></li>
+      <li><a href="#sim">Try it: the autoscaler</a></li>
+      <li><a href="#cold">Cold starts</a></li>
+      <li><a href="#pd">Splitting prefill and decode</a></li>
+      <li><a href="#yours">Your attacker model</a></li>
+      <li><a href="#quiz">Check yourself</a></li>
+    </ol>
+  </nav>
+
+  <section class="step" id="layers">
+    <div class="step-head"><span class="num">1</span><h2>Three layers</h2></div>
+    <p>One vLLM server is an engine. A service needs more around it. On Kubernetes, the usual open-source stack has three layers:</p>
+    <ol class="seq">
+      <li><span><strong>vLLM</strong> runs the model in each pod. Everything from Lessons 1 to 6 happens here.</span></li>
+      <li><span><strong>KServe</strong> deploys the model. You describe it in one YAML file, and KServe creates the pods, service and autoscaler.</span></li>
+      <li><span><strong>llm-d</strong> makes the copies work as a team. It adds cache-aware routing, splits prefill and decode, and scales on inference signals.</span></li>
+    </ol>
+    <p>The vLLM docs list both ways in: KServe with its Hugging Face runtime, or KServe's <code>LLMInferenceService</code>, which uses llm-d.</p>
+    <p class="key"><span>Key idea</span>vLLM is the engine, KServe deploys it, llm-d coordinates the copies.</p>
+  </section>
+
+  <section class="step" id="kserve">
+    <div class="step-head"><span class="num">2</span><h2>KServe: deploying the model</h2></div>
+    <p>KServe has two resources for this. <code>InferenceService</code> is the original, built for classic ML models and simple LLM use. <code>LLMInferenceService</code> is built for LLMs. It adds llm-d routing, split prefill and decode, and Gateway API support.</p>
+    <p>KServe can also run in two modes. The choice decides whether a model can scale to zero.</p>
+    <table class="cmp">
+      <thead><tr><th></th><th>Standard</th><th>Knative</th></tr></thead>
+      <tbody>
+        <tr><td>Creates</td><td>Normal Deployments, Services and HPAs</td><td>Knative services</td></tr>
+        <tr><td>Autoscaling</td><td>HPA, or KEDA for custom metrics</td><td>Knative, based on requests</td></tr>
+        <tr><td>Scale to zero</td><td>No (not from zero on HTTP)</td><td>Yes; a component holds requests while a pod starts</td></tr>
+        <tr><td>KServe's advice</td><td>Highly recommended for LLMs</td><td>For bursty traffic where cost matters most</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top:14px">Red Hat OpenShift AI deprecated KServe's Serverless (Knative) mode in version 2.25. Version 3 requires moving to RawDeployment, its name for Standard mode.</p>
+    <p class="key"><span>Key idea</span>Standard mode is the normal choice for LLMs. It gives up scale to zero.</p>
+  </section>
+
+  <section class="step" id="route">
+    <div class="step-head"><span class="num">3</span><h2>Routing that knows the cache</h2></div>
+    <p>A normal load balancer treats requests as small, equal and stateless. LLM requests are none of these. Some run for a minute. And a copy that already holds a request's prefix in its cache can skip most of the prefill (Lesson 4).</p>
+    <p>Round-robin ignores that. In the demo at the top, try 4 copies and 32 prompts. Every copy sees all 32 prompts, but can only keep 12. So most requests miss and pay for prefill again.</p>
+    <figure class="fig">
+      <p class="fig-title">How a request finds its copy</p>
+      <div class="path" role="img" aria-label="Client sends to the gateway, the gateway asks the endpoint picker, the picker chooses the pod with the cached prefix">
+        <div class="box"><b>Gateway</b><span>Receives the request, as with any web service</span></div>
+        <div class="arr">↓ asks</div>
+        <div class="box epp"><b>Endpoint picker (EPP)</b><span>1. Filter: drop unhealthy pods and pods with the wrong model. 2. Score: who has this prefix cached? Whose queue is short? 3. Pick the top score.</span></div>
+        <div class="arr">↓ sends to</div>
+        <div class="pods"><div>pod A</div><div class="pick">pod B: has the prefix</div><div>pod C</div></div>
+      </div>
+      <figcaption>This is the Kubernetes Gateway API Inference Extension. An <code>InferencePool</code> lists the model pods, and the EPP picks among them. llm-d supplies the EPP.</figcaption>
+    </figure>
+    <p>Sending every prompt to one copy has a risk: a popular prompt can overload it. So llm-d's picker also scores queue length. It sometimes seeds a prompt onto other copies, and it gives up the cache match when the warm copy is much slower.</p>
+    <p>How much can it matter? In an llm-d test built to show the effect, 8 copies of Qwen3-32B served prompts that share prefixes. Time to first token fell from 35 seconds to 120 milliseconds. Throughput rose 151%.</p>
+    <p class="key"><span>Key idea</span>With many copies and many repeated prompts, route by cache. With few prompts, round-robin is fine.</p>
+  </section>
+
+  <section class="step" id="scale">
+    <div class="step-head"><span class="num">4</span><h2>What to scale on</h2></div>
+    <p>Out of the box, Kubernetes' autoscaler (HPA) scales on CPU or memory. Neither tracks LLM load, because the work is on the GPU. GPU utilization looks like the fix, but it isn't.</p>
+    <p>GPU utilization, as <code>nvidia-smi</code> reports it, is the share of time <em>any</em> kernel is running. vLLM runs kernels non-stop while it decodes even one request. So the number sits near 100% whether there is 1 request or 200.</p>
+    <p>vLLM exports better signals on its <code>/metrics</code> page:</p>
+    <ul>
+      <li><code>vllm:num_requests_waiting</code>: requests queued, not yet started.</li>
+      <li><code>vllm:num_requests_running</code>: requests in the current batch.</li>
+      <li><code>vllm:kv_cache_usage_perc</code>: how full the KV cache is.</li>
+    </ul>
+    <p>KEDA reads one of these from Prometheus. By default it sets copies = the total ÷ your target per copy, rounded up. The HPA then adds copies at once, but waits 5 minutes before removing any.</p>
+    <p class="key"><span>Key idea</span>Scale on what the server is going through: its queue, its batch, its KV cache. Not GPU utilization.</p>
+  </section>
+
+  <section class="step" id="sim">
+    <div class="step-head"><span class="num">5</span><h2>Try it: the autoscaler</h2></div>
+    <figure class="fig">
+      <p class="fig-title">30 minutes of traffic: quiet, a rise to 10 requests per second, then quiet again</p>
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="asLab">Scale on</span><div class="seg" id="asSeg" role="group" aria-labelledby="asLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="acLab">Time for a new copy to be ready</span><div class="seg" id="acSeg" role="group" aria-labelledby="acLab"></div></div>
+      </div>
+      <p class="chart-lab">Copies</p>
+      <svg class="chart" id="cCopies" viewBox="0 0 340 120" role="img" aria-label="Copies over time"></svg>
+      <div class="leg3"><span><i style="background:var(--decode)"></i>ready</span><span><i style="background:var(--decode-tint);box-shadow:inset 0 0 0 1px var(--decode)"></i>starting (holds a GPU, can't answer)</span><span><i style="background:none;border-top:2px dashed var(--ink);height:0;border-radius:0;vertical-align:3px"></i>copies the traffic needs</span></div>
+      <p class="chart-lab">Requests waiting in the queue</p>
+      <svg class="chart" id="cWait" viewBox="0 0 340 100" role="img" aria-label="Waiting requests over time"></svg>
+      <p class="scrub-out" id="scrubOut" aria-live="polite">Touch or hover the charts to read any minute.</p>
+      <div class="readouts">
+        <div class="ro"><b id="aGpu">113</b><span>GPU-minutes used</span></div>
+        <div class="ro"><b id="aPeak">116</b><span>most requests waiting</span></div>
+        <div class="ro"><b id="aWorst">29 s</b><span>worst wait, roughly</span></div>
+      </div>
+      <figcaption>Toy model: each copy runs up to 32 requests at once, and each request takes 8 seconds. So one copy serves 4 requests per second. The HPA checks every 15 seconds, with up to 8 copies. Targets: 80% GPU utilization, 5 waiting per copy, or 24 in flight per copy.</figcaption>
+    </figure>
+    <p>Three things to see:</p>
+    <ul>
+      <li><strong>GPU utilization</strong> reads 100% all the time, so it climbs to 8 copies and stays there. Nobody waits, but it uses about twice the GPUs.</li>
+      <li><strong>Waiting requests</strong> works on the way up. But once the copies catch up, the queue is empty, so it removes them. The queue returns and it scales up again: it flaps.</li>
+      <li><strong>In flight</strong> (running + waiting) follows the traffic. It still overshoots on the way up, because new copies take time to start.</li>
+    </ul>
+    <p>Now switch to 4 minutes. Every signal suffers, because no autoscaler can fix a slow start. That is the next step.</p>
+    <p>Production tools go further. llm-d's workload variant autoscaler watches KV cache use and queue length. It adds copies when spare room runs low, and removes one only if the rest can still cope.</p>
+    <p class="key"><span>Key idea</span>A queue tells you that you are already short. Pair it with load in flight or KV cache use.</p>
+  </section>
+
+  <section class="step" id="cold">
+    <div class="step-head"><span class="num">6</span><h2>Cold starts</h2></div>
+    <p>"Pod is running" is not "model is ready". A new vLLM copy has to do all of this first:</p>
+    <ol class="seq">
+      <li><span><strong>Pull the image.</strong> The vLLM image can be 28 GB. In one test on Google Cloud, the pull alone took about 4 minutes. Nodes that already hold the image skip this.</span></li>
+      <li><span><strong>Get the weights.</strong> 16 GB for an 8B model, from Hugging Face, S3 or a volume.</span></li>
+      <li><span><strong>Load them into GPU memory.</strong> In one Azure test, Llama 3.1 8B loaded in 15.5 s with vLLM's default loader. It took 3.6 s with the Run:ai Model Streamer.</span></li>
+      <li><span><strong>Warm up.</strong> vLLM compiles the model and records CUDA graphs before it reports ready.</span></li>
+    </ol>
+    <p>Ways to shorten it: keep the image cached on GPU nodes, and keep weights close, on a volume or the node's disk. Stream them in with <code>--load-format runai_streamer</code>, which can read straight from S3. And keep at least one copy warm if users can't wait.</p>
+    <p class="key"><span>Key idea</span>Cold start time decides how fast you can scale. Measure it, then shorten the slowest step.</p>
+  </section>
+
+  <section class="step" id="pd">
+    <div class="step-head"><span class="num">7</span><h2>Splitting prefill and decode</h2></div>
+    <p>Lesson 4 showed long prompts slowing down everyone else's tokens. Chunked prefill softens this. P/D disaggregation removes it: prompts are processed on some GPUs, and tokens are generated on others.</p>
+    <figure class="fig">
+      <div class="pd" role="img" aria-label="Prefill pods build the KV cache and send it to decode pods">
+        <div class="side p"><b>Prefill pods</b>Read the whole prompt. Compute-heavy.</div>
+        <div class="mid" aria-hidden="true">→</div>
+        <div class="side d"><b>Decode pods</b>Write the reply, one token at a time. Memory-heavy.</div>
+      </div>
+      <p class="pd-note">The KV cache moves across, through vLLM's NIXL connector</p>
+      <figcaption>The KV cache can be big. Llama 3.1 70B uses 320 KiB per token (Lesson 2), so a 10,000-token prompt is about 3.3 GB. At 400 Gb/s that adds about 65 ms to the first token.</figcaption>
+    </figure>
+    <p>A guide on the vLLM blog names the main use: long prompts at high load push the slowest token times (p99 ITL) past target. It needs a fast link: RDMA between servers, or NVLink inside one.</p>
+    <p>It can also hurt. The transfer adds to every first token. The guide's slow test used two PCIe GPUs without a direct link. Median first-token time was 2.2 s split, versus 0.7 s together. For small models, short prompts or light traffic, keep prefill and decode together.</p>
+    <p class="key"><span>Key idea</span>Split prefill and decode for big models, long prompts and heavy traffic, on fast links. Otherwise, don't.</p>
+  </section>
+
+  <section class="step" id="yours">
+    <div class="step-head"><span class="num">8</span><h2>Your attacker model</h2></div>
+    <p>One copy of an 8B model on a 0.3 share. What from this lesson applies?</p>
+    <ul>
+      <li><strong>Routing:</strong> not yet. With one copy, every request goes to the same cache.</li>
+      <li><strong>Autoscaling:</strong> red-team runs come in bursts, and a queue during a run is fine. If you add copies, scale on requests in flight.</li>
+      <li><strong>Scale to zero:</strong> KServe's Standard mode, the only one left in OpenShift AI 3, can't wake a model from zero on an HTTP request. Keep one copy, or start it before a run.</li>
+      <li><strong>Cold start:</strong> worth measuring for your hardened image. If weights come from S3, try the Run:ai streamer.</li>
+      <li><strong>P/D split:</strong> no. The model is small and the traffic is light.</li>
+    </ul>
+    <p class="key"><span>Key idea</span>Most of this matters once you run many copies. Learn it now; use it when traffic grows.</p>
+  </section>
+
+  <section class="step" id="quiz">
+    <div class="step-head plain"><h2>Check yourself</h2></div>
+    <p>Answer each one first, out loud or in chat, then open the answer.</p>
+    <div class="q"><p><span class="qn">1</span>4 copies, 50 different long system prompts, and each cache fits 12. Roughly what hit rate does round-robin get? And cache-aware routing?</p>
+      <details><summary>Show answer</summary><div class="ans">Round-robin: each copy sees all 50 but keeps 12, so about 12 ÷ 50 = 24%. Cache-aware: each copy gets about 12 or 13 prompts. Most fit, so the hit rate is high, roughly 90% or more.</div></details></div>
+    <div class="q"><p><span class="qn">2</span>Why can't GPU utilization tell 1 request from 200?</p>
+      <details><summary>Show answer</summary><div class="ans">It measures the share of time any kernel is running. vLLM keeps kernels running while it decodes even one request, so it reads near 100% either way.</div></details></div>
+    <div class="q"><p><span class="qn">3</span>You scale on <code>vllm:num_requests_waiting</code> alone. Under steady traffic, copies go up and down every few minutes. Why?</p>
+      <details><summary>Show answer</summary><div class="ans">Once the copies keep up, nothing waits, so the signal says "fewer copies". After the 5-minute wait, the HPA removes them, the queue returns, and it scales up again. Scale on requests in flight or KV cache use instead, or add them as a second signal.</div></details></div>
+    <div class="q"><p><span class="qn">4</span>A new copy takes 4 minutes to start, and traffic can double in 1 minute. What do you change?</p>
+      <details><summary>Show answer</summary><div class="ans">Shorten the start: cache the image on GPU nodes, keep weights close, stream them in. And keep spare room: more minimum copies, or a lower target so scaling starts earlier.</div></details></div>
+    <div class="q"><p><span class="qn">5</span>A 70B model, 10,000-token prompts, and a plain 100 Gb/s network without RDMA. Is splitting prefill and decode across servers a good idea?</p>
+      <details><summary>Show answer</summary><div class="ans">Probably not. Each prompt's KV cache is about 3.3 GB. At 100 Gb/s (12.5 GB/s) that is about 260 ms added to every first token, before any overhead. The vLLM guide asks for RDMA or NVLink.</div></details></div>
+  </section>
+
+  <section class="step recap" id="next">
+    <div class="step-head plain"><h2>What to remember</h2></div>
+    <ol>
+      <li>vLLM runs the model, KServe deploys it, llm-d coordinates many copies.</li>
+      <li>KServe's Standard mode is the usual choice for LLMs, but can't scale to zero.</li>
+      <li>Round-robin wastes prefix caches when there are many prompts; cache-aware routing keeps each prompt on one copy.</li>
+      <li>Scale on requests in flight or KV cache use, not GPU utilization. A queue alone flaps.</li>
+      <li>Cold start limits how fast you can scale. Cache the image, keep weights close, stream them.</li>
+      <li>Split prefill and decode only for big models, long prompts and heavy load, on fast links.</li>
+    </ol>
+    <div class="next"><b>Next: Lesson 8, benchmarking and cost</b>How to measure a deployment and read latency percentiles. How much load it takes before you miss targets, and the cost per million tokens. <a href="https://claude.ai/artifact/Bk4dodCHpZEYQH2F6Ld12S">Open Lesson 8</a></div>
+    <p style="margin-top:14px"><a href="https://claude.ai/artifact/NzSi3BVZim2ETkfvjtpwPf">Back to Lesson 6</a></p>
+  </section>
+
+  <footer class="sources">
+    Sources
+    <ul>
+      <li><a href="https://docs.vllm.ai/en/stable/deployment/integrations/llm-d/">vLLM docs: llm-d</a> and <a href="https://docs.vllm.ai/deployment/integrations/kserve.html">KServe</a>: what llm-d adds, the two ways to use KServe</li>
+      <li><a href="https://developers.redhat.com/articles/2026/08/05/trace-kubernetes-resources-llm-d-model-serving">Red Hat: resources behind LLMInferenceService</a>: InferenceService versus LLMInferenceService</li>
+      <li><a href="https://kserve.github.io/website/docs/concepts/architecture">KServe architecture</a>, <a href="https://kserve.github.io/website/docs/admin-guide/kubernetes-deployment">Standard mode install</a> and <a href="https://kserve.github.io/website/docs/concepts/architecture/control-plane">control plane</a>: the two modes, scale to zero, KEDA</li>
+      <li><a href="https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/release_notes/support-removals_relnotes">OpenShift AI release notes</a> and <a href="https://access.redhat.com/articles/7134025">migration article</a>: Serverless mode deprecated, move to RawDeployment</li>
+      <li><a href="https://developers.redhat.com/articles/2026/06/04/intelligent-inference-scheduling-llm-d-red-hat-ai">Red Hat: intelligent inference scheduling with llm-d</a>: filter, score, pick; hotspot safeguards; the 35 s to 120 ms test</li>
+      <li><a href="https://gateway-api-inference-extension.sigs.k8s.io/">Gateway API Inference Extension</a>: InferencePool and the endpoint picker</li>
+      <li><a href="https://itnext.io/100-gpu-utilization-39-of-rated-fp16-ce97ba1b88f0">What GPU-Util measures</a>, from NVIDIA's definition</li>
+      <li><a href="https://keda.sh/docs/2.20/reference/scaledobject-spec">KEDA ScaledObject reference</a> and <a href="https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html/autoscale_apis/horizontalpodautoscaler-autoscaling-v2">HPA API</a>: polling, average-value targets, 5-minute scale-down window</li>
+      <li><a href="https://docs.aws.amazon.com/eks/latest/userguide/ml-inference-autoscaling-hpa-keda.md">AWS EKS: KEDA on vLLM queue depth</a></li>
+      <li><a href="https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html/deploy_models_using_distributed_inference_with_llm-d/autoscaling-llmd-model-deployments">OpenShift AI: autoscaling llm-d deployments</a>: the workload variant autoscaler (Technology Preview)</li>
+      <li><a href="https://dudeperf3ct.github.io/posts/vllm_startup_load_time">vLLM startup on GKE</a>: 28 GB image, about 236 s pull</li>
+      <li><a href="https://devblogs.microsoft.com/azure-sdk/eliminate-llm-cold-starts-load-models-up-to-6x-faster-with-azure-blob-storage-and-runai-model-streamer/">Azure: Run:ai Model Streamer</a>: 8B load 15.5 s versus 3.6 s; <a href="https://docs.aws.amazon.com/eks/latest/userguide/ml-inference-fast-model-loading.html">AWS EKS</a>: streaming from S3</li>
+      <li><a href="https://vllm.ai/blog/2026-09-29-disaggregated-serving-guide">vLLM blog: a practical guide to disaggregated serving</a>: when it helps, fast links, 3 GB and 65 ms, the slow PCIe test</li>
+    </ul>
+  </footer>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n, d = 0) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+(function () { const prog = $('#prog'); if (!prog) return; const onScroll = () => { const h = document.documentElement; const max = h.scrollHeight - h.clientHeight; prog.style.width = (max > 0 ? h.scrollTop / max * 100 : 0) + '%'; }; window.addEventListener('scroll', onScroll, { passive: true }); onScroll(); })();
+function seg(host, items, obj, key, cb, label) {
+  const btns = items.map((it, i) => {
+    const b = el('button', null, label ? label(it) : it.name); b.type = 'button';
+    b.setAttribute('aria-pressed', String(i === obj[key]));
+    b.addEventListener('click', () => { obj[key] = i; sync(); cb(); });
+    host.appendChild(b); return b;
+  });
+  function sync() { btns.forEach((x, j) => x.setAttribute('aria-pressed', String(j === obj[key]))); }
+  return sync;
+}
+function bars(host, rows, scale) {
+  host.innerHTML = '';
+  rows.forEach((r) => {
+    const row = el('div', 'row');
+    const lab = el('div', 'lab'); lab.appendChild(el('span', null, r.name)); lab.appendChild(el('b', null, r.text));
+    const tr = el('div', 'track'); const f = el('div', 'fill' + (r.cls ? ' ' + r.cls : '')); f.style.width = (Math.min(1, r.v / scale) * 100) + '%';
+    tr.appendChild(f); row.appendChild(lab); row.appendChild(tr); host.appendChild(row);
+  });
+}
+
+(function () {
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ---------- Hero: routing ---------- */
+  function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  const CAP = 12, NREQ = 1200;
+  function makeRun(R, G, mode) {
+    const r = rng(42), caches = Array.from({ length: R }, () => []); let rr = 0;
+    const steps = [];
+    for (let i = 0; i < NREQ; i++) {
+      const g = Math.floor(r() * G), k = mode === 0 ? (rr++ % R) : (g % R), c = caches[k], j = c.indexOf(g);
+      let hit = false;
+      if (j >= 0) { hit = true; c.splice(j, 1); c.push(g); } else { c.push(g); if (c.length > CAP) c.shift(); }
+      steps.push({ k, g, hit, snap: c.slice() });
+    }
+    const hits = steps.filter((s) => s.hit).length;
+    return { steps, hit: hits / NREQ };
+  }
+  const RM = [{ name: 'Round-robin' }, { name: 'Cache-aware' }];
+  const RC = [2, 4, 8], RG = [8, 32, 96];
+  const rs = { m: 0, c: 1, g: 1 };
+  seg($('#rmSeg'), RM, rs, 'm', setupR); seg($('#rcSeg'), RC, rs, 'c', setupR, (v) => String(v)); seg($('#rgSeg'), RG, rs, 'g', setupR, (v) => String(v));
+  const host = $('#copies'); let boxes = [], timer = null, cur = null;
+  function pct(x) { return Math.round(x * 100) + '%'; }
+  function drawBox(k, snap, flash) {
+    const b = boxes[k]; b.slots.forEach((s, i) => {
+      const g = snap[i]; s.textContent = g == null ? '' : String(g + 1); s.className = 'slot';
+      if (flash && g === flash.g) s.className = 'slot ' + (flash.hit ? 'hit' : 'miss');
+    });
+  }
+  function setupR() {
+    if (timer) { cancelAnimationFrame(timer); timer = null; }
+    const R = RC[rs.c], G = RG[rs.g];
+    const a = makeRun(R, G, 0), b = makeRun(R, G, 1);
+    cur = rs.m === 0 ? a : b;
+    $('#hRR').textContent = pct(a.hit); $('#hCA').textContent = pct(b.hit);
+    $('#hHold').textContent = G + ' vs ' + Math.ceil(G / R);
+    host.innerHTML = ''; boxes = [];
+    for (let k = 0; k < R; k++) {
+      const d = el('div', 'copy'); const h = el('h4'); h.appendChild(el('b', null, 'Copy ' + (k + 1))); const cnt = el('span', null, ''); h.appendChild(cnt);
+      d.appendChild(h); const sl = el('div', 'slots'); const slots = [];
+      for (let i = 0; i < CAP; i++) { const s = el('div', 'slot'); sl.appendChild(s); slots.push(s); }
+      d.appendChild(sl); host.appendChild(d); boxes.push({ slots, cnt, hits: 0, n: 0 });
+    }
+    showEnd();
+  }
+  function showEnd() {
+    const R = RC[rs.c], last = new Array(R).fill(null), per = boxes.map(() => ({ h: 0, n: 0 }));
+    cur.steps.forEach((s) => { last[s.k] = s.snap; per[s.k].n++; if (s.hit) per[s.k].h++; });
+    for (let k = 0; k < R; k++) { drawBox(k, last[k] || [], null); boxes[k].cnt.textContent = per[k].n ? pct(per[k].h / per[k].n) + ' hits' : ''; }
+    const G = RG[rs.g];
+    let msg = '<b>' + RM[rs.m].name + ': ' + pct(cur.hit) + ' of requests found their prompt cached.</b> ';
+    if (rs.m === 0 && G > CAP) msg += 'Every copy sees all ' + G + ' prompts but holds only 12, so it keeps throwing prompts out.';
+    else if (rs.m === 0) msg += 'Only ' + G + ' prompts, so every copy can hold them all. Round-robin is fine here.';
+    else if (Math.ceil(G / RC[rs.c]) > CAP) msg += 'Each copy still gets ' + Math.ceil(G / RC[rs.c]) + ' prompts, more than 12. More copies would help.';
+    else { const n = Math.ceil(G / RC[rs.c]); msg += n === 1 ? 'Each copy only sees its own single prompt.' : 'Each copy only sees its own ' + n + ' prompts, and they all fit.'; }
+    $('#rStatus').innerHTML = msg;
+    host.setAttribute('aria-label', RM[rs.m].name + ', ' + R + ' copies, ' + pct(cur.hit) + ' hit rate');
+  }
+  function play() {
+    if (timer) cancelAnimationFrame(timer);
+    if (reduce) { showEnd(); return; }
+    const R = RC[rs.c]; boxes.forEach((b, k) => { b.h = 0; b.n = 0; drawBox(k, [], null); b.cnt.textContent = ''; });
+    let i = 0, hits = 0; const per = boxes.map(() => ({ h: 0, n: 0 }));
+    const step = () => {
+      const end = Math.min(NREQ, i + 6);
+      const touched = {};
+      for (; i < end; i++) { const s = cur.steps[i]; per[s.k].n++; if (s.hit) { per[s.k].h++; hits++; } touched[s.k] = s; }
+      Object.keys(touched).forEach((k) => { const s = touched[k]; drawBox(+k, s.snap, s); boxes[k].cnt.textContent = pct(per[k].h / per[k].n) + ' hits'; });
+      $('#rStatus').innerHTML = '<b>' + fmt(i) + ' sent.</b> ' + pct(hits / i) + ' found their prompt cached so far.';
+      if (i < NREQ) timer = requestAnimationFrame(step); else { timer = null; showEnd(); }
+    };
+    timer = requestAnimationFrame(step);
+  }
+  $('#rPlay').addEventListener('click', play);
+  setupR();
+
+  /* ---------- Step 5: autoscaler ---------- */
+  function lam(t) { if (t < 300) return 2; if (t < 420) return 2 + 8 * (t - 300) / 120; if (t < 1200) return 10; if (t < 1320) return 10 - 8 * (t - 1200) / 120; return 2; }
+  function autoscale(signal, cold) {
+    const T = 8, B = 32, MAX = 8, MIN = 1; let N = 16, spec = 1, ready = 1, pending = [], recs = [], gpuSec = 0, peakW = 0, worst = 0; const series = [];
+    for (let t = 0; t < 1800; t++) {
+      pending = pending.filter((p) => { if (p <= t) { ready++; return false; } return true; });
+      N += lam(t) - Math.min(N, B * ready) / T;
+      const running = Math.min(N, B * ready), waiting = N - running;
+      if (waiting > peakW) peakW = waiting;
+      const wt = waiting / (ready * B / T); if (wt > worst) worst = wt;
+      if (t % 15 === 0 && t > 0) {
+        let d;
+        if (signal === 0) { const util = running > 0.5 ? 100 : 0, r = util / 80; d = Math.abs(r - 1) <= 0.1 ? spec : Math.ceil(spec * r); }
+        else if (signal === 1) d = Math.ceil(waiting / 5);
+        else d = Math.ceil((running + waiting) / 24);
+        d = Math.max(MIN, Math.min(MAX, d)); recs.push([t, d]); recs = recs.filter((x) => x[0] > t - 300);
+        let target;
+        if (d > spec) target = Math.min(d, Math.max(2 * spec, spec + 4));
+        else { target = Math.max.apply(null, recs.map((x) => x[1])); if (target > spec) target = spec; }
+        if (target !== spec) {
+          if (target > spec) { for (let i = 0; i < target - spec; i++) pending.push(t + cold); }
+          else { let drop = spec - target; while (drop > 0 && pending.length) { pending.pop(); drop--; } ready -= drop; }
+          spec = target;
+        }
+      }
+      gpuSec += spec;
+      series.push({ t, spec, ready, waiting, need: Math.ceil(lam(t) * T / B), lam: lam(t) });
+    }
+    return { gpuMin: gpuSec / 60, peakW, worst, series };
+  }
+  const AS = [{ name: 'GPU utilization' }, { name: 'Waiting requests' }, { name: 'In flight' }];
+  const AC = [{ name: '1 minute', s: 60 }, { name: '4 minutes', s: 240 }];
+  const as = { s: 2, c: 0 };
+  seg($('#asSeg'), AS, as, 's', renderA); seg($('#acSeg'), AC, as, 'c', renderA);
+  const NS = 'http://www.w3.org/2000/svg';
+  function sv(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+  const L = 30, Rr = 334, W = Rr - L;
+  const xOf = (t) => L + t / 1800 * W;
+  let cursors = [], series = null;
+  function stepPath(pts, yOf, base) {
+    let d = 'M' + xOf(0) + ',' + base;
+    let prev = null;
+    pts.forEach((p, i) => { const y = yOf(p.v); if (i === 0) d += 'L' + xOf(p.t) + ',' + y; else if (y !== prev) d += 'L' + xOf(p.t) + ',' + prev + 'L' + xOf(p.t) + ',' + y; prev = y; });
+    d += 'L' + xOf(1800) + ',' + prev + 'L' + xOf(1800) + ',' + base + 'Z';
+    return d;
+  }
+  function linePath(pts, yOf) {
+    let d = '', prev = null;
+    pts.forEach((p, i) => { const y = yOf(p.v); if (i === 0) d = 'M' + xOf(p.t) + ',' + y; else if (y !== prev) d += 'L' + xOf(p.t) + ',' + prev + 'L' + xOf(p.t) + ',' + y; prev = y; });
+    return d + 'L' + xOf(1800) + ',' + prev;
+  }
+  function niceMax(v) { if (v <= 10) return 10; const p = Math.pow(10, Math.floor(Math.log10(v))); const m = v / p; return (m <= 2 ? 2 : m <= 5 ? 5 : 10) * p; }
+  function renderA() {
+    const res = autoscale(as.s, AC[as.c].s); series = res.series;
+    const c1 = $('#cCopies'), c2 = $('#cWait'); c1.innerHTML = ''; c2.innerHTML = ''; cursors = [];
+    // Copies chart
+    const T1 = 8, B1 = 104, yC = (v) => B1 - v / 8 * (B1 - T1);
+    [0, 2, 4, 6, 8].forEach((v) => { sv('line', { class: 'gl', x1: L, x2: Rr, y1: yC(v), y2: yC(v) }, c1); const tx = sv('text', { x: L - 6, y: yC(v) + 3, 'text-anchor': 'end' }, c1); tx.textContent = v; });
+    sv('path', { class: 'spec', d: stepPath(series.map((p) => ({ t: p.t, v: p.spec })), yC, B1) }, c1);
+    sv('path', { class: 'ready', d: stepPath(series.map((p) => ({ t: p.t, v: p.ready })), yC, B1) }, c1);
+    sv('path', { class: 'need', d: linePath(series.map((p) => ({ t: p.t, v: p.need })), yC) }, c1);
+    // Waiting chart
+    const mx = niceMax(Math.max(1, res.peakW)), T2 = 8, B2 = 80, yW = (v) => B2 - v / mx * (B2 - T2);
+    [0, mx / 2, mx].forEach((v) => { sv('line', { class: 'gl', x1: L, x2: Rr, y1: yW(v), y2: yW(v) }, c2); const tx = sv('text', { x: L - 6, y: yW(v) + 3, 'text-anchor': 'end' }, c2); tx.textContent = v >= 1000 ? fmt(v / 1000, v % 1000 ? 1 : 0) + 'k' : fmt(v); });
+    let d = 'M' + xOf(0) + ',' + B2; series.forEach((p, i) => { if (i % 5 === 0 || i === series.length - 1) d += 'L' + xOf(p.t) + ',' + yW(p.waiting); }); d += 'L' + xOf(1800) + ',' + B2 + 'Z';
+    sv('path', { class: 'wait', d }, c2);
+    [0, 5, 10, 15, 20, 25, 30].forEach((m) => { const tx = sv('text', { x: xOf(m * 60), y: 96, 'text-anchor': m === 0 ? 'start' : m === 30 ? 'end' : 'middle' }, c2); tx.textContent = m === 30 ? '30 min' : m; });
+    [[c1, T1, B1], [c2, T2, B2]].forEach(([svg, top, bot]) => { const ln = sv('line', { class: 'cur', x1: -10, x2: -10, y1: top, y2: bot }, svg); cursors.push(ln); });
+    $('#aGpu').textContent = fmt(res.gpuMin);
+    $('#aPeak').textContent = fmt(res.peakW);
+    $('#aWorst').textContent = res.worst < 1 ? 'none' : res.worst >= 90 ? fmt(res.worst / 60, 1) + ' min' : fmt(res.worst) + ' s';
+    c1.setAttribute('aria-label', AS[as.s].name + ': ' + fmt(res.gpuMin) + ' GPU-minutes, up to ' + Math.max.apply(null, series.map((p) => p.spec)) + ' copies');
+    c2.setAttribute('aria-label', 'Up to ' + fmt(res.peakW) + ' requests waiting');
+    $('#scrubOut').textContent = 'Touch or hover the charts to read any minute.';
+  }
+  function scrub(ev) {
+    if (!series) return;
+    const svg = ev.currentTarget, r = svg.getBoundingClientRect();
+    const x = (ev.clientX - r.left) / r.width * 340; const t = Math.max(0, Math.min(1799, Math.round((x - L) / W * 1800)));
+    const p = series[t]; cursors.forEach((c) => { c.setAttribute('x1', xOf(t)); c.setAttribute('x2', xOf(t)); });
+    $('#scrubOut').textContent = 'Minute ' + fmt(t / 60, 1) + ': traffic ' + fmt(p.lam, 1) + ' requests/s. ' + p.ready + ' ready, ' + (p.spec - p.ready) + ' starting, ' + fmt(p.waiting) + ' waiting.';
+  }
+  ['#cCopies', '#cWait'].forEach((s) => { const e = $(s); e.addEventListener('pointermove', scrub); e.addEventListener('pointerdown', scrub); });
+  renderA();
+})();
+</script>
+</body>
+</html>
