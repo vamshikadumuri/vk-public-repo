@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One GPU Is Rarely the Right Size</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+
+
+:root {
+  /* Layout: same system as Lesson 1. One reading column (max 680px); each step = numbered heading, prose, one framed figure, one key idea.
+     Colour carries meaning: violet = model weights, teal = KV cache (decode memory), grey = overhead, hatched = held back. Amber stays prefill. */
+  --paper: #F4F6F9;
+  --band: #E8ECF2;
+  --surface: #FFFFFF;
+  --ink: #172036;
+  --muted: #586178;
+  --rule: #DCE1EA;
+  --prefill: #C27C0E;
+  --decode: #0088A3;
+  --decode-tint: #DBEEF2;
+  --weights: #7B5BD6;
+  --weights-tint: #EAE4FA;
+  --over: #A3ABB9;
+  --off: #B9C0CC;
+  --tok-a: #E3E8F0;
+  --tok-b: #D3DBE7;
+  --bad: #B42318;
+  --bad-tint: #FCE9E7;
+  --good: #1F7A4A;
+  --good-tint: #E3F3EA;
+  --display: 'Bricolage Grotesque', 'Avenir Next', system-ui, sans-serif;
+  --body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+    --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+    --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+    --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+  --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+  --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+  --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition: none !important; animation: none !important; } }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--body); font-size: 17px; line-height: 1.6; -webkit-text-size-adjust: 100%; }
+a { color: var(--decode); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--decode); outline-offset: 2px; border-radius: 4px; }
+.progress { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 10; }
+.progress span { display: block; height: 100%; width: 0; background: var(--decode); }
+.wrap { max-width: 680px; margin: 0 auto; padding: 0 20px; }
+
+/* Hero */
+.hero { background: var(--band); padding: 40px 0 32px; border-bottom: 1px solid var(--rule); }
+.kicker { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; }
+.kicker a { color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 800; font-size: clamp(2.2rem, 9vw, 3.4rem); line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 14px; text-wrap: balance; }
+h1 .t { border-radius: 6px; padding: 0 0.06em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+h1 .t:nth-child(odd) { background: var(--tok-a); }
+h1 .t:nth-child(even) { background: var(--tok-b); }
+.lede { font-size: 1.08rem; margin: 0 0 22px; max-width: 34em; }
+
+.demo { background: var(--surface); border: 1.5px solid var(--ink); border-radius: 16px; padding: 18px 16px 16px; }
+.demo-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 10px; }
+
+/* Memory bar */
+.mem { display: flex; height: 44px; border-radius: 8px; overflow: hidden; border: 1px solid var(--rule); background: var(--surface); }
+.mem > div { position: relative; min-width: 0; display: flex; align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 600; white-space: nowrap; overflow: hidden; transition: flex-basis .3s ease; }
+.mem .w { background: var(--weights); color: #fff; }
+.mem .o { background: var(--over); }
+.mem .k { background: var(--decode-tint); color: var(--ink); justify-content: flex-start; }
+.mem .k .kfill { position: absolute; inset: 0 auto 0 0; width: 100%; background: var(--decode); transition: width .25s linear; }
+.mem .k span { position: relative; padding-left: 8px; color: #fff; text-shadow: 0 0 2px rgba(0,0,0,.25); }
+.mem .h { background: repeating-linear-gradient(135deg, var(--off) 0 3px, transparent 3px 7px); color: var(--muted); }
+.mem-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 8px; }
+.mem-legend b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+.sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+.sw.w { background: var(--weights); } .sw.o { background: var(--over); } .sw.k { background: var(--decode); }
+.sw.h { background: repeating-linear-gradient(135deg, var(--off) 0 2px, transparent 2px 4px); box-shadow: inset 0 0 0 1px var(--off); }
+.sw.kv { background: var(--decode); } .sw.vv { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+
+.users { display: grid; grid-template-columns: repeat(auto-fill, minmax(13px, 1fr)); gap: 4px; margin: 14px 0 6px; }
+.u { aspect-ratio: 1; border-radius: 50%; border: 1.5px solid var(--rule); background: transparent; transition: background-color .15s, border-color .15s; }
+.u.on { background: var(--decode); border-color: var(--decode); }
+.u.wait { border: 2px dashed var(--bad); }
+.demo-stats { display: flex; justify-content: space-between; gap: 8px; font-size: 0.82rem; color: var(--muted); }
+.demo-stats b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.demo-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-top: 12px; }
+.status { font-size: 0.92rem; min-height: 3em; margin: 0; flex: 1 1 260px; }
+@media (max-width: 480px) { .status { min-height: 4.6em; } }
+
+button, .seg button { font: inherit; font-size: 0.92rem; font-weight: 500; color: var(--ink); cursor: pointer; background: var(--surface); border: 1.5px solid var(--ink); border-radius: 999px; padding: 7px 16px; }
+button:hover { background: var(--band); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--ink); color: var(--paper); }
+button.primary:hover { opacity: .9; background: var(--ink); }
+
+.toc { padding: 26px 0 6px; }
+.toc h2 { font-family: var(--display); font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.toc ol { margin: 0; padding-left: 1.4em; columns: 2; column-gap: 28px; font-size: 0.95rem; }
+.toc li { break-inside: avoid; margin: 2px 0; }
+@media (max-width: 480px) { .toc ol { columns: 1; } }
+
+section.step { padding: 36px 0 8px; scroll-margin-top: 12px; }
+.step-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.step-head.plain { border-top: 2px solid var(--ink); padding-top: 14px; }
+.num { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--ink); display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 1.05rem; }
+h2 { font-family: var(--display); font-weight: 800; font-size: 1.6rem; line-height: 1.2; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h3 { font-family: var(--display); font-weight: 600; font-size: 1.1rem; margin: 22px 0 6px; }
+p { margin: 0 0 14px; }
+.key { border-left: 3px solid var(--ink); padding: 2px 0 2px 14px; margin: 18px 0 8px; font-weight: 500; }
+.key span { display: block; font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+figure { margin: 18px 0; }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 16px; }
+figcaption { font-size: 0.86rem; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+.fig-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 12px; }
+.note { font-size: 0.8rem; color: var(--muted); }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--band); border-radius: 4px; padding: 0 4px; }
+
+.chip { font-family: var(--mono); font-size: 0.84rem; line-height: 1.5; white-space: pre; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink); display: inline-block; }
+.chip.d { background: var(--decode-tint); border-color: var(--decode); }
+
+
+/* Controls */
+.controls { display: grid; gap: 14px; margin-bottom: 16px; }
+.ctl label, .ctl .ctl-name { display: block; font-size: 0.84rem; color: var(--muted); margin-bottom: 5px; }
+.ctl output { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { padding: 5px 13px; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+input[type=range] { width: 100%; accent-color: var(--decode); height: 28px; margin: 0; }
+.readouts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 4px 0 14px; }
+.ro { background: var(--paper); border-radius: 10px; padding: 10px 10px 8px; }
+.ro b { display: block; font-family: var(--display); font-weight: 800; font-size: 1.4rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ro span { display: block; font-size: 0.76rem; color: var(--muted); line-height: 1.3; margin-top: 3px; }
+@media (max-width: 400px) { .ro b { font-size: 1.15rem; } }
+
+/* Sequence list */
+.seq { list-style: none; counter-reset: s; padding: 0; margin: 0 0 16px; display: grid; gap: 10px; }
+.seq li { counter-increment: s; display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
+.seq li::before { content: counter(s); display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--band); font-family: var(--display); font-weight: 800; font-size: 0.85rem; }
+
+/* Log card */
+.log { font-family: var(--mono); font-size: 0.78rem; line-height: 1.55; background: var(--band); border-radius: 10px; padding: 12px 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0 0; }
+.log .i { color: var(--muted); }
+.log .e { color: var(--bad); }
+.log b { font-weight: 500; color: var(--ink); }
+
+/* Quiz */
+.q { border-top: 1px solid var(--rule); padding: 14px 0 6px; }
+.q p { margin: 0 0 8px; font-weight: 500; }
+.q p .qn { font-family: var(--display); font-weight: 800; margin-right: 6px; }
+details summary { cursor: pointer; color: var(--decode); font-weight: 500; font-size: 0.92rem; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "+"; display: inline-block; width: 1em; font-weight: 600; }
+details[open] summary::before { content: "\2212"; }
+details .ans { margin: 8px 0 10px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; font-size: 0.95rem; }
+.recap ol { padding-left: 1.3em; margin: 0 0 14px; }
+.recap li { margin: 4px 0; }
+.next { background: var(--band); border-radius: 14px; padding: 18px; margin: 18px 0 8px; }
+.next b { font-family: var(--display); font-size: 1.15rem; display: block; margin-bottom: 4px; }
+.sources { font-size: 0.82rem; color: var(--muted); padding: 24px 0 48px; }
+.sources ul { padding-left: 1.1em; margin: 6px 0 0; }
+.sources a { color: var(--muted); }
+
+/* Lesson 4 */
+.words { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 14px 16px; margin: 6px 0 0; }
+.words h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.words dl { margin: 0; display: grid; grid-template-columns: 124px 1fr; gap: 6px 12px; font-size: 0.92rem; }
+.words dt { font-weight: 600; }
+.words dd { margin: 0; }
+@media (max-width: 400px) { .words dl { grid-template-columns: 1fr; gap: 0; } .words dd { margin-bottom: 8px; } }
+
+.track { position: relative; height: 16px; border-radius: 4px; background-image: linear-gradient(to right, var(--rule) 1px, transparent 1px); background-size: 25% 100%; }
+.fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; min-width: 2px; transition: width .3s ease; background: var(--decode); }
+.fill.muted { background: var(--off); }
+.hbars .row { margin: 8px 0; }
+.hbars .lab { display: flex; justify-content: space-between; gap: 8px; font-size: 0.86rem; margin-bottom: 3px; }
+.hbars .lab b { font-variant-numeric: tabular-nums; }
+
+/* Hero request bars */
+.panels { display: grid; gap: 14px; }
+.panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 0.86rem; margin-bottom: 5px; }
+.panel-head b { font-weight: 600; }
+.panel-head span { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.panel-head span strong { color: var(--ink); }
+.reqs { display: grid; gap: 3px; }
+.rq { display: flex; height: 16px; border-radius: 4px; overflow: hidden; gap: 2px; transition: opacity .25s; }
+.rq.off { opacity: 0; }
+.rq .s, .rq .own { height: 100%; }
+.rq .s { flex: 2048; }
+.rq .own { flex: 256; background: var(--prefill); }
+.rq .s.calc { background: var(--prefill); }
+.rq .s.hit { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.leg { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 10px; }
+.sw.calc { background: var(--prefill); } .sw.hit { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); } .sw.dec { background: var(--decode); }
+
+/* Block matcher */
+.scen { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.scen button { font-size: 0.84rem; padding: 5px 12px; }
+.scen button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.mrow { margin-bottom: 12px; }
+.mrow .who { font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; }
+.mrow .who span { font-weight: 400; color: var(--muted); }
+.mblocks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.mb { border-radius: 8px; padding: 5px 6px 6px; border: 1.5px solid var(--rule); background: var(--surface); min-height: 74px; display: grid; grid-template-rows: auto 1fr auto; gap: 3px; }
+.mb .fp { font-family: var(--mono); font-size: 0.68rem; color: var(--muted); }
+.mb .toks { display: flex; flex-wrap: wrap; gap: 2px 4px; align-content: start; font-family: var(--mono); font-size: 0.74rem; line-height: 1.35; }
+.mb .toks i { font-style: normal; }
+.mb .toks i.diff { color: var(--bad); font-weight: 600; text-decoration: underline; }
+.mb .st { font-size: 0.7rem; font-weight: 600; }
+.mb.cached { border-color: var(--decode); }
+.mb.hit { background: var(--decode-tint); border-color: var(--decode); }
+.mb.hit .st { color: var(--ink); }
+.mb.miss { background: var(--surface); border-color: var(--prefill); box-shadow: inset 0 0 0 1px var(--prefill); }
+.mb.miss .st { color: var(--prefill); }
+.mresult { font-size: 0.92rem; background: var(--paper); border-radius: 10px; padding: 8px 12px; margin-top: 4px; }
+
+/* Order compare */
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 480px) { .two { grid-template-columns: 1fr; } }
+.tpl { border-radius: 12px; padding: 12px; background: var(--surface); border: 1px solid var(--rule); }
+.tpl h4 { margin: 0 0 8px; font-size: 0.9rem; }
+.tpl.bad { box-shadow: inset 3px 0 0 var(--bad); }
+.tpl.good { box-shadow: inset 3px 0 0 var(--good); }
+.tpl ol { margin: 0; padding-left: 1.2em; font-size: 0.88rem; }
+.tpl li { margin: 3px 0; }
+.tpl .var { color: var(--bad); font-weight: 600; }
+.tpl .fixed { color: var(--ink); }
+.tpl p { margin: 8px 0 0; font-size: 0.84rem; color: var(--muted); }
+
+/* Free list */
+.freeq { display: flex; flex-wrap: wrap; gap: 4px; align-items: stretch; }
+.fq { flex: 0 0 auto; min-width: 58px; border-radius: 8px; padding: 6px 8px; font-size: 0.74rem; background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.fq b { display: block; font-family: var(--mono); font-size: 0.78rem; }
+.fq.lru { box-shadow: inset 0 0 0 2px var(--bad); }
+.fq.hit { background: var(--decode); color: #fff; box-shadow: none; }
+.fq-ends { display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--muted); margin-top: 6px; }
+
+/* Timeline */
+.tl { display: flex; height: 30px; gap: 1px; border-radius: 6px; overflow: hidden; margin: 8px 0 4px; }
+.tl div { min-width: 1px; }
+.tl .dp { background: var(--decode); }
+.tl .mp { background: var(--prefill); }
+.tl-ends { display: flex; justify-content: space-between; font-size: 0.76rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.levers { list-style: none; margin: 0; padding: 0; }
+.levers li { padding: 12px 0 12px 12px; border-bottom: 1px solid var(--rule); box-shadow: inset 3px 0 0 var(--decode); }
+.levers li:last-child { border-bottom: 0; }
+.levers .flag { font-family: var(--mono); font-size: 0.86rem; font-weight: 500; display: block; margin-bottom: 2px; }
+.levers p { margin: 0; font-size: 0.95rem; }
+.levers .cost { display: block; font-size: 0.84rem; color: var(--muted); margin-top: 3px; }
+.callout { background: var(--band); border-radius: 14px; padding: 16px; margin: 18px 0; }
+.callout b.h { font-family: var(--display); font-size: 1.1rem; display: block; margin-bottom: 6px; }
+.callout ul { margin: 0; padding-left: 1.1em; }
+.callout li { margin: 5px 0; }
+.warnbox { border-radius: 12px; padding: 12px 14px; background: var(--bad-tint); box-shadow: inset 3px 0 0 var(--bad); margin: 14px 0; font-size: 0.95rem; }
+.formula { font-family: var(--display); font-weight: 600; font-size: 1.05rem; text-align: center; background: var(--surface); border: 1px dashed var(--muted); border-radius: 12px; padding: 14px 12px; margin: 16px 0; }
+.mresult { font-size: 0.92rem; background: var(--paper); border-radius: 10px; padding: 8px 12px; margin-top: 4px; }
+
+/* Lesson 6 */
+main p code, main li code, .ctl-name code { white-space: nowrap; }
+.gpus { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; align-items: end; height: 190px; margin: 12px 0 4px; }
+.gcol { display: flex; flex-direction: column-reverse; height: 100%; border: 1.5px solid var(--rule); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.gcol.idle { opacity: .25; }
+.gcol > div { transition: flex-basis .3s; min-height: 0; }
+.gcol .w { background: var(--weights); }
+.gcol .o { background: var(--over); }
+.gcol .k { background: var(--decode); }
+.gcol .h { background: repeating-linear-gradient(135deg, var(--off) 0 3px, transparent 3px 7px); }
+.gcol .x { background: repeating-linear-gradient(135deg, var(--bad) 0 3px, transparent 3px 7px); }
+.glab { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; font-size: 0.7rem; color: var(--muted); text-align: center; }
+.verdict { border-radius: 10px; padding: 10px 12px; margin: 12px 0; font-size: 0.92rem; }
+.verdict.ok { background: var(--good-tint); box-shadow: inset 3px 0 0 var(--good); }
+.verdict.no { background: var(--bad-tint); box-shadow: inset 3px 0 0 var(--bad); }
+
+.tp { display: grid; gap: 6px; }
+.tp-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.tp-cell { border-radius: 8px; padding: 8px 6px; text-align: center; font-size: 0.78rem; background: var(--weights-tint); box-shadow: inset 0 0 0 1px var(--weights); }
+.tp-cell b { display: block; font-size: 0.72rem; color: var(--muted); font-weight: 500; }
+.tp-sync { border-radius: 8px; padding: 6px; text-align: center; font-size: 0.78rem; font-weight: 600; background: repeating-linear-gradient(90deg, var(--prefill-tint, #F7EDDD) 0 8px, transparent 8px 12px); box-shadow: inset 0 0 0 1.5px var(--prefill); }
+.tp-head { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; font-size: 0.74rem; font-weight: 600; text-align: center; }
+
+.pp { display: grid; grid-template-columns: 92px repeat(6, 1fr); gap: 4px; font-size: 0.76rem; align-items: center; }
+.pp .h { color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
+.pp .lab { font-weight: 600; font-size: 0.74rem; white-space: nowrap; line-height: 1.25; }
+.pp .c { height: 30px; border-radius: 6px; display: grid; place-items: center; font-weight: 600; }
+.pp .c.a { background: var(--decode); color: #fff; }
+.pp .c.b { background: color-mix(in srgb, var(--decode) 65%, var(--surface)); color: #fff; }
+.pp .c.e { background: repeating-linear-gradient(135deg, var(--off) 0 2px, transparent 2px 5px); }
+.pp .c.n { background: transparent; }
+
+table.cmp { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.cmp th, .cmp td { text-align: left; padding: 8px 8px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.cmp th { font-weight: 600; }
+.cmp td:first-child { color: var(--muted); width: 28%; }
+
+.mig { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin: 10px 0 4px; }
+.mig div { height: 30px; border-radius: 5px; background: var(--rule); }
+.mig div.on { background: var(--decode); }
+.mig div.on2 { background: color-mix(in srgb, var(--decode) 60%, var(--surface)); }
+.mig-note { font-size: 0.78rem; color: var(--muted); }
+pre.cmd { font-family: var(--mono); font-size: 0.8rem; background: var(--band); border-radius: 10px; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 10px 0; }
+</style>
+</head>
+<body>
+<div class="progress" aria-hidden="true"><span id="prog"></span></div>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="kicker"><span>Inference track, lesson 6 of 8</span><a href="https://claude.ai/artifact/8m8maPTnDHsbPQWnqjz1bA">Back to your prep plan</a></p>
+    <h1 aria-label="One GPU is rarely the right size"><span class="t">One</span><span class="t"> GPU</span><span class="t"> is</span><span class="t"> rarely</span><span class="t"> the</span><span class="t"> right</span><span class="t"> size</span></h1>
+    <p class="lede">Some models are too big for one GPU, so you split them across several. Some are too small for one, so you share it. This lesson covers both.</p>
+
+    <div class="demo">
+      <p class="demo-title">Try it: split a model across A100 80GB GPUs</p>
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="hmLab">Model</span><div class="seg" id="hmSeg" role="group" aria-labelledby="hmLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="hpLab">Weights</span><div class="seg" id="hpSeg" role="group" aria-labelledby="hpLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="htLab">GPUs per copy (<code>--tensor-parallel-size</code>)</span><div class="seg" id="htSeg" role="group" aria-labelledby="htLab"></div></div>
+      </div>
+      <div class="gpus" id="gpus" role="img" aria-label="Memory of each GPU"></div>
+      <div class="glab" aria-hidden="true"><span>GPU 0</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span></div>
+      <div class="mem-legend"><span><i class="sw w"></i>weights</span><span><i class="sw o"></i>overhead (3 GB assumed)</span><span><i class="sw k"></i>KV cache</span><span><i class="sw h"></i>not claimed (10%)</span></div>
+      <div class="verdict" id="hv" aria-live="polite"></div>
+      <div class="readouts">
+        <div class="ro"><b id="hW">35.3 GB</b><span>weights on each GPU</span></div>
+        <div class="ro"><b id="hK">411,000</b><span>KV cache tokens, all GPUs</span></div>
+        <div class="ro"><b id="hS">58</b><span>tokens/s ceiling, one request</span></div>
+      </div>
+      <p class="note" style="margin:0">Same math as Lessons 1 and 2, per GPU at 0.9 utilization. Overhead is a little above Lesson 2's 2 GB, because GPUs that talk to each other need extra buffers. The speed ceiling adds up the GPUs' memory bandwidth. It ignores the time they spend talking, so real speed is lower.</p>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="words" aria-labelledby="wordsH">
+    <h2 id="wordsH">Words used in this lesson</h2>
+    <dl>
+      <dt>Node</dt><dd>One server, usually with 4 or 8 GPUs inside.</dd>
+      <dt>NVLink</dt><dd>A very fast link between GPUs in the same server.</dd>
+      <dt>All-reduce</dt><dd>A step where GPUs combine their partial results so all of them get the total.</dd>
+      <dt>Tensor parallel</dt><dd>Every layer is split across GPUs.</dd>
+      <dt>Pipeline parallel</dt><dd>Groups of layers go on different GPUs, one after another.</dd>
+      <dt>Replica</dt><dd>One complete copy of the model serving requests.</dd>
+      <dt>MIG</dt><dd>Multi-Instance GPU: cutting one GPU into separate smaller GPUs in hardware.</dd>
+      <dt>Time-slicing</dt><dd>Letting several programs take turns on one GPU.</dd>
+    </dl>
+  </section>
+
+  <nav class="toc" aria-label="Lesson steps">
+    <h2>In this lesson</h2>
+    <ol>
+      <li><a href="#three">Three reasons to use more GPUs</a></li>
+      <li><a href="#tp">Tensor parallelism</a></li>
+      <li><a href="#pp">Pipeline parallelism</a></li>
+      <li><a href="#choose">Choosing a split</a></li>
+      <li><a href="#share">Sharing one GPU</a></li>
+      <li><a href="#mig">Try it: MIG slices</a></li>
+      <li><a href="#yours">Which do you have?</a></li>
+      <li><a href="#quiz">Check yourself</a></li>
+    </ol>
+  </nav>
+
+  <section class="step" id="three">
+    <div class="step-head"><span class="num">1</span><h2>Three reasons to use more GPUs</h2></div>
+    <ul>
+      <li><strong>The model doesn't fit.</strong> Llama 3.1 70B in 16-bit needs 141 GB for weights alone. One A100 has 80 GB. You must split it.</li>
+      <li><strong>It fits, but with little room left.</strong> Splitting also splits the KV cache, so more requests fit at once.</li>
+      <li><strong>You need more throughput.</strong> Run more complete copies (replicas) and spread requests across them. Lesson 7 covers this.</li>
+    </ul>
+    <p>The first two need you to split one model. There are two main ways: across the layers' width (tensor parallel) or along their depth (pipeline parallel).</p>
+    <p class="key"><span>Key idea</span>Split a model when it doesn't fit or has no room for the KV cache. Add replicas when you need more throughput.</p>
+  </section>
+
+  <section class="step" id="tp">
+    <div class="step-head"><span class="num">2</span><h2>Tensor parallelism</h2></div>
+    <p>Tensor parallelism splits <em>every layer</em> across the GPUs. With 4 GPUs, each holds a quarter of every weight matrix and a quarter of the attention heads. All four work on every token at the same time.</p>
+    <figure class="fig">
+      <p class="fig-title">One layer of Llama 3.1 70B, split across 4 GPUs</p>
+      <div class="tp" role="img" aria-label="Each GPU computes a quarter of attention, they combine, each computes a quarter of the MLP, they combine again">
+        <div class="tp-head"><span>GPU 0</span><span>GPU 1</span><span>GPU 2</span><span>GPU 3</span></div>
+        <div class="tp-row"><div class="tp-cell"><b>attention heads</b>1–16</div><div class="tp-cell"><b>attention heads</b>17–32</div><div class="tp-cell"><b>attention heads</b>33–48</div><div class="tp-cell"><b>attention heads</b>49–64</div></div>
+        <div class="tp-sync">Combine results (all-reduce)</div>
+        <div class="tp-row"><div class="tp-cell"><b>MLP</b>¼ of it</div><div class="tp-cell"><b>MLP</b>¼ of it</div><div class="tp-cell"><b>MLP</b>¼ of it</div><div class="tp-cell"><b>MLP</b>¼ of it</div></div>
+        <div class="tp-sync">Combine results (all-reduce)</div>
+      </div>
+      <figcaption>The usual design, from Megatron-LM, needs two combine steps per layer. Llama 3.1 70B has 80 layers, so that is 160 combine steps on every pass.</figcaption>
+    </figure>
+    <p>All that combining needs a very fast link. Inside one A100 server, NVLink moves 600 GB/s. A normal PCIe Gen4 slot moves 64 GB/s, almost 10 times less. That is why tensor parallelism is used <em>inside</em> one server.</p>
+    <p>The payoff: weights, KV cache and memory bandwidth are all shared out. So tensor parallelism both fits bigger models and makes each token faster. Turn it on with <code>--tensor-parallel-size 4</code>.</p>
+    <p class="key"><span>Key idea</span>Tensor parallel splits every layer. It is fast, but only works well over NVLink inside one server.</p>
+  </section>
+
+  <section class="step" id="pp">
+    <div class="step-head"><span class="num">3</span><h2>Pipeline parallelism</h2></div>
+    <p>Pipeline parallelism splits the model by depth. GPU 0 holds layers 1 to 40; GPU 1 holds layers 41 to 80. A token goes through GPU 0 first, then its result moves to GPU 1. Only one small hand-off per stage, so a slower link between servers is fine.</p>
+    <figure class="fig">
+      <p class="fig-title">Two stages, two requests (A and B) in flight</p>
+      <div class="pp" role="img" aria-label="With two requests in flight, both stages stay busy after the first step">
+        <span></span><span class="h">t1</span><span class="h">t2</span><span class="h">t3</span><span class="h">t4</span><span class="h">t5</span><span class="h">t6</span>
+        <span class="lab">GPU 0<br>layers 1–40</span><span class="c a">A</span><span class="c b">B</span><span class="c a">A</span><span class="c b">B</span><span class="c a">A</span><span class="c b">B</span>
+        <span class="lab">GPU 1<br>layers 41–80</span><span class="c e"></span><span class="c a">A</span><span class="c b">B</span><span class="c a">A</span><span class="c b">B</span><span class="c a">A</span>
+      </div>
+      <figcaption>Each square is half a pass. While GPU 1 finishes A's token, GPU 0 starts on B. With only one request, each GPU would sit idle half the time (hatched).</figcaption>
+    </figure>
+    <p>The catch: one request's pass still goes through every stage in turn, so pipeline parallelism doesn't make a single request faster. It needs several requests in flight to keep every stage busy. vLLM's flag is <code>--pipeline-parallel-size</code>.</p>
+    <p class="key"><span>Key idea</span>Pipeline parallel splits by layers. It needs little bandwidth, so it works across servers, but it needs many requests to stay busy.</p>
+  </section>
+
+  <section class="step" id="choose">
+    <div class="step-head"><span class="num">4</span><h2>Choosing a split</h2></div>
+    <p>The vLLM docs give a simple order to follow:</p>
+    <ol class="seq">
+      <li><span><strong>Fits on one GPU?</strong> Don't split. Use one GPU.</span></li>
+      <li><span><strong>Fits in one server?</strong> Use tensor parallel across its GPUs, for example <code>--tensor-parallel-size 4</code>.</span></li>
+      <li><span><strong>Needs several servers?</strong> Tensor parallel inside each server, pipeline parallel across servers. With 2 servers of 8 GPUs: tensor parallel 8, pipeline parallel 2.</span></li>
+    </ol>
+    <p>Two exceptions from the same docs. If your GPUs have no NVLink, such as L40S cards, use pipeline parallel instead, even inside one server. And if the GPU count doesn't divide the model evenly, pipeline parallel can split layers unevenly.</p>
+    <p>After it starts, check the "GPU KV cache size" line in the log, as in Lesson 2. If it's too small for your traffic, add GPUs.</p>
+    <p class="key"><span>Key idea</span>One GPU if it fits. Tensor parallel inside a server. Add pipeline parallel across servers.</p>
+  </section>
+
+  <section class="step" id="share">
+    <div class="step-head"><span class="num">5</span><h2>Sharing one GPU</h2></div>
+    <p>Now the opposite problem: an 8B model on an 80 GB A100 leaves most of the card unused. Two common ways to share it:</p>
+    <table class="cmp">
+      <thead><tr><th></th><th>MIG</th><th>Time-slicing</th></tr></thead>
+      <tbody>
+        <tr><td>How</td><td>Cuts the GPU into up to 7 separate smaller GPUs in hardware</td><td>Programs take turns on the whole GPU</td></tr>
+        <tr><td>Memory</td><td>Each slice has its own memory</td><td>Shared; nothing stops one program from using it all</td></tr>
+        <tr><td>Faults</td><td>A crash stays inside its slice</td><td>No isolation</td></tr>
+        <tr><td>Compute</td><td>Each slice has its own fixed compute</td><td>An equal share of time, with no guarantee</td></tr>
+        <tr><td>GPUs</td><td>A100, A30, H100 and newer data-center GPUs</td><td>Most NVIDIA GPUs, old ones too</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top:14px">This matters for vLLM. In a MIG slice, vLLM sees a smaller GPU, and <code>--gpu-memory-utilization</code> applies to that slice. With time-slicing, vLLM sees the whole card. Its utilization flag then becomes the only budget. It is a per-instance limit that doesn't coordinate with other programs on the GPU. So the flags of all vLLM servers on one card must add up to 1.0 or less. Users also report that starting them one after another works better than starting them together.</p>
+    <p class="key"><span>Key idea</span>MIG gives real walls inside the GPU. Time-slicing gives turns, with no walls, so memory budgets are on you.</p>
+  </section>
+
+  <section class="step" id="mig">
+    <div class="step-head"><span class="num">6</span><h2>Try it: MIG slices on an A100 80GB</h2></div>
+    <figure class="fig">
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="mpLab">MIG slice</span><div class="seg" id="mpSeg" role="group" aria-labelledby="mpLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="mwLab">Llama 3.1 8B weights</span><div class="seg" id="mwSeg" role="group" aria-labelledby="mwLab"></div></div>
+      </div>
+      <div class="mig" id="migBar" role="img" aria-label="Compute slices used"></div>
+      <p class="mig-note" id="migNote"></p>
+      <div class="verdict" id="mv" aria-live="polite"></div>
+      <figcaption>A slice name gives its compute (out of 7 parts) and its memory. The math uses the memory in the name. Budget = 0.9 × slice memory, minus weights, minus 2 GB assumed overhead. Weights are parameters × bytes. Real quantized files are a little bigger, because a few layers usually stay 16-bit.</figcaption>
+    </figure>
+    <p class="key"><span>Key idea</span>Pick the smallest slice that leaves enough KV cache room. Or shrink the weights (Lesson 5) to fit a smaller slice.</p>
+  </section>
+
+  <section class="step" id="yours">
+    <div class="step-head"><span class="num">7</span><h2>Which do you have?</h2></div>
+    <p>Lessons 2 to 5 assumed your attacker model's "0.3 A100 share" means vLLM gets about 24 GB. That is right if it means <code>--gpu-memory-utilization 0.3</code> on a shared 80 GB card. It is wrong if it is a MIG slice. Check from inside the pod:</p>
+    <pre class="cmd">nvidia-smi -L</pre>
+    <p>If MIG is on, the output lists MIG devices with names like <code>MIG 2g.20gb</code>. If it only shows the full GPU, you are not on a MIG slice. You share the whole card, or have it to yourself.</p>
+    <p>In Kubernetes you can also look at what the pod asks for, but it is less certain. With the GPU Operator's "mixed" MIG setting, slices appear as resources such as <code>nvidia.com/mig-2g.20gb</code>. With the "single" setting, slices appear as plain <code>nvidia.com/gpu</code>, just like a whole or time-sliced GPU. Time-sliced GPUs may also be renamed <code>nvidia.com/gpu.shared</code>. So trust <code>nvidia-smi -L</code> first.</p>
+    <p class="key"><span>Key idea</span>Know which kind of share you have. It decides what memory vLLM really gets and who can disturb it.</p>
+  </section>
+
+  <section class="step" id="quiz">
+    <div class="step-head plain"><h2>Check yourself</h2></div>
+    <p>Answer each one first, out loud or in chat, then open the answer.</p>
+    <div class="q"><p><span class="qn">1</span>Llama 3.1 70B in 16-bit on A100 80GB GPUs, utilization 0.9, 3 GB overhead per GPU. What is the smallest tensor-parallel size that leaves room for the KV cache?</p>
+      <details><summary>Show answer</summary><div class="ans">2 GPUs: 70.6 GB of weights + 3 GB each = 73.6 GB, more than the 72 GB budget. 4 GPUs: 35.3 + 3 = 38.3 GB each, leaving about 34 GB per GPU for the KV cache. So 4. (3 is not allowed: the 64 attention heads must split evenly.)</div></details></div>
+    <div class="q"><p><span class="qn">2</span>Why not run tensor parallel across two servers linked by a normal network?</p>
+      <details><summary>Show answer</summary><div class="ans">Tensor parallel combines results twice per layer, on every pass: 160 times per pass for a 70B model. That needs NVLink-class speed. Across servers, use pipeline parallel, which only hands off once per stage.</div></details></div>
+    <div class="q"><p><span class="qn">3</span>You have 4 L40S GPUs without NVLink in one server. Tensor or pipeline parallel?</p>
+      <details><summary>Show answer</summary><div class="ans">Pipeline parallel. The vLLM docs recommend it when GPUs have no NVLink, for higher throughput and less communication.</div></details></div>
+    <div class="q"><p><span class="qn">4</span>Two vLLM servers share a time-sliced A100 80GB, each with utilization 0.5. A teammate adds a third with 0.3. What happens?</p>
+      <details><summary>Show answer</summary><div class="ans">The budgets add up to 1.3, more than the card has. Time-slicing has no memory walls, so the third server will fail to start or cause out-of-memory errors. Keep the total at 1.0 or less, or use MIG.</div></details></div>
+    <div class="q"><p><span class="qn">5</span>Can Llama 3.1 8B in 16-bit run on a MIG 2g.20gb slice?</p>
+      <details><summary>Show answer</summary><div class="ans">Not usefully. The budget is 0.9 × 20 = 18 GB. 16 GB of weights plus about 2 GB of overhead leaves nothing for the KV cache. Use FP8 weights, which leave about 7 to 8 GB for the cache, or a 3g.40gb slice.</div></details></div>
+  </section>
+
+  <section class="step recap" id="next">
+    <div class="step-head plain"><h2>What to remember</h2></div>
+    <ol>
+      <li>Split a model when it doesn't fit or has no KV room; add replicas for throughput.</li>
+      <li>Tensor parallel splits every layer, needs NVLink, and makes each token faster.</li>
+      <li>Pipeline parallel splits by layers, works across servers, and needs many requests in flight.</li>
+      <li>vLLM's order: one GPU, then tensor parallel in a server, then add pipeline parallel across servers.</li>
+      <li>MIG gives hardware walls; time-slicing doesn't, so <code>--gpu-memory-utilization</code> totals must stay at 1.0 or less.</li>
+    </ol>
+    <div class="next"><b>Next: Lesson 7, serving on Kubernetes</b>KServe and llm-d, scaling on queue length instead of GPU use, cold starts, and splitting prefill and decode onto different GPUs. <a href="https://claude.ai/artifact/BiKCvaaG54E7RXHftZdQje">Open Lesson 7</a></div>
+    <p style="margin-top:14px"><a href="https://claude.ai/artifact/EVM9BQ9JuJfBjvBiwY1UHD">Back to Lesson 5</a></p>
+  </section>
+
+  <footer class="sources">
+    Sources
+    <ul>
+      <li><a href="https://docs.vllm.ai/en/stable/serving/parallelism_scaling/">vLLM docs: parallelism and scaling</a>: when to use one GPU, tensor parallel, pipeline parallel; L40S and uneven-split exceptions; KV cache log line</li>
+      <li><a href="https://arxiv.org/abs/1909.08053">Shoeybi et al., Megatron-LM</a>: splitting attention and MLP, one combine step per block</li>
+      <li><a href="https://developer.nvidia.com/blog/scaling-language-model-training-to-a-trillion-parameters-using-megatron">NVIDIA: scaling with Megatron</a>: tensor parallel communication is slow across servers</li>
+      <li><a href="https://nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf">NVIDIA A100 datasheet</a>: NVLink 600 GB/s, PCIe Gen4 64 GB/s, up to 7 MIG instances</li>
+      <li><a href="https://docs.nvidia.com/ai-enterprise/release-8/latest/infra-software/vgpu/reference/ampere-a100.html">NVIDIA: A100 MIG-backed profiles</a>: 1g.10gb to 7g.80gb and how many of each fit</li>
+      <li><a href="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/22.9.1/gpu-sharing.html">NVIDIA GPU Operator: time-slicing</a>: no memory or fault isolation, no proportional compute</li>
+      <li><a href="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/26.3/gpu-sharing.html">NVIDIA GPU Operator, later version</a>: <code>nvidia.com/gpu.shared</code> naming</li>
+      <li><a href="https://discuss.vllm.ai/t/interpret-process-memory-metrics-available-from-metrics-endpoint/1260">vLLM forum: utilization is per instance</a> and <a href="https://discuss.vllm.ai/t/multiple-vllm-engine-deployment-problem-on-nvidias-sm-engines/1685">starting instances one after another</a></li>
+    </ul>
+  </footer>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n, d = 0) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+(function () { const prog = $('#prog'); if (!prog) return; const onScroll = () => { const h = document.documentElement; const max = h.scrollHeight - h.clientHeight; prog.style.width = (max > 0 ? h.scrollTop / max * 100 : 0) + '%'; }; window.addEventListener('scroll', onScroll, { passive: true }); onScroll(); })();
+function seg(host, items, obj, key, cb, label) {
+  const btns = items.map((it, i) => {
+    const b = el('button', null, label ? label(it) : it.name); b.type = 'button';
+    b.setAttribute('aria-pressed', String(i === obj[key]));
+    b.addEventListener('click', () => { obj[key] = i; sync(); cb(); });
+    host.appendChild(b); return b;
+  });
+  function sync() { btns.forEach((x, j) => x.setAttribute('aria-pressed', String(j === obj[key]))); }
+  return sync;
+}
+function bars(host, rows, scale) {
+  host.innerHTML = '';
+  rows.forEach((r) => {
+    const row = el('div', 'row');
+    const lab = el('div', 'lab'); lab.appendChild(el('span', null, r.name)); lab.appendChild(el('b', null, r.text));
+    const tr = el('div', 'track'); const f = el('div', 'fill' + (r.cls ? ' ' + r.cls : '')); f.style.width = (Math.min(1, r.v / scale) * 100) + '%';
+    tr.appendChild(f); row.appendChild(lab); row.appendChild(tr); host.appendChild(row);
+  });
+}
+
+(function () {
+  /* Hero: tensor-parallel planner */
+  const HM = [{ name: 'Llama 3.1 8B', p: 8.03e9, kvt: 131072 }, { name: 'Llama 3.1 70B', p: 70.6e9, kvt: 327680 }];
+  const HP = [{ name: 'BF16', b: 2 }, { name: 'FP8', b: 1 }];
+  const HT = [1, 2, 4, 8];
+  const hs = { m: 1, p: 0, t: 2 };
+  seg($('#hmSeg'), HM, hs, 'm', renderH); seg($('#hpSeg'), HP, hs, 'p', renderH); seg($('#htSeg'), HT, hs, 't', renderH, (v) => String(v));
+  const gp = $('#gpus'); const cols = [];
+  for (let i = 0; i < 8; i++) {
+    const c = el('div', 'gcol'); const parts = {};
+    ['w', 'o', 'k', 'h'].forEach((k) => { const d = el('div', k); c.appendChild(d); parts[k] = d; });
+    gp.appendChild(c); cols.push({ c, parts });
+  }
+  function renderH() {
+    const m = HM[hs.m], wb = HP[hs.p].b, n = HT[hs.t];
+    const W = m.p * wb / 1e9, wg = W / n, over = 3, budget = 72, mem = 80;
+    const kv = Math.max(0, budget - wg - over);
+    const fits = wg + over < budget;
+    cols.forEach((col, i) => {
+      const on = i < n; col.c.className = 'gcol' + (on ? '' : ' idle');
+      const wv = Math.min(wg, mem), ov = Math.min(over, Math.max(0, mem - wv));
+      const kk = on ? kv : 0, hh = Math.max(0, mem - wv - ov - kk);
+      col.parts.w.style.flexBasis = (on ? wv / mem * 100 : 0) + '%';
+      col.parts.o.style.flexBasis = (on ? ov / mem * 100 : 0) + '%';
+      col.parts.k.style.flexBasis = (kk / mem * 100) + '%';
+      col.parts.h.style.flexBasis = (on ? hh / mem * 100 : 100) + '%';
+      col.parts.w.className = 'w' + (on && wg > mem ? ' x' : '');
+    });
+    const tokens = Math.floor(n * kv * 1e9 / m.kvt);
+    $('#hW').textContent = fmt(wg, 1) + ' GB';
+    $('#hK').textContent = fits ? fmt(Math.round(tokens / 1000) * 1000) : '0';
+    $('#hS').textContent = fits ? fmt(n * 2039 / W) : '\u2014';
+    const v = $('#hv');
+    if (wg > mem) { v.className = 'verdict no'; v.innerHTML = '<b>Doesn’t fit.</b> Each GPU would need ' + fmt(wg, 0) + ' GB for weights, more than its 80 GB.'; }
+    else if (!fits) { v.className = 'verdict no'; v.innerHTML = '<b>No room for the KV cache.</b> ' + fmt(wg, 1) + ' GB of weights + 3 GB overhead is more than the 72 GB budget per GPU. Use more GPUs or smaller weights.'; }
+    else { v.className = 'verdict ok'; v.innerHTML = '<b>Fits on ' + n + ' GPU' + (n > 1 ? 's' : '') + '.</b> About ' + fmt(kv, 0) + ' GB of KV cache per GPU, ' + fmt(n * kv, 0) + ' GB in total.' + (n > 1 && HT[hs.t - 1] && (W / HT[hs.t - 1]) + over < budget ? ' Fewer GPUs would also fit; more GPUs buy KV room and speed.' : ''); }
+    gp.setAttribute('aria-label', n + ' GPUs used, ' + fmt(wg, 1) + ' GB of weights each');
+  }
+  renderH();
+
+  /* Step 6: MIG */
+  const MP = [
+    { name: '1g.10gb', g: 1, mem: 10, max: 7 }, { name: '2g.20gb', g: 2, mem: 20, max: 3 },
+    { name: '3g.40gb', g: 3, mem: 40, max: 2 }, { name: '4g.40gb', g: 4, mem: 40, max: 1 }, { name: '7g.80gb', g: 7, mem: 80, max: 1 }
+  ];
+  const MW = [{ name: 'BF16', b: 2 }, { name: 'FP8', b: 1 }, { name: 'INT4', b: 0.5 }];
+  const ms = { p: 1, w: 0 };
+  seg($('#mpSeg'), MP, ms, 'p', renderM); seg($('#mwSeg'), MW, ms, 'w', renderM);
+  const mb = $('#migBar'); const mcells = [];
+  for (let i = 0; i < 7; i++) { const d = el('div'); mb.appendChild(d); mcells.push(d); }
+  function renderM() {
+    const p = MP[ms.p], w = 8.03 * MW[ms.w].b, budget = 0.9 * p.mem, kv = budget - w - 2;
+    mcells.forEach((c, i) => { c.className = i < p.g ? 'on' : ''; });
+    $('#migNote').textContent = p.name + ': ' + p.g + ' of 7 compute slices and ' + p.mem + ' GB of memory. Up to ' + p.max + ' of these fit on one A100 80GB.';
+    const v = $('#mv');
+    if (kv <= 0.5) { v.className = 'verdict no'; v.innerHTML = '<b>No room.</b> Budget ' + fmt(budget, 0) + ' GB − ' + fmt(w, 1) + ' GB weights − 2 GB overhead leaves ' + (kv > 0 ? fmt(kv, 1) + ' GB' : 'nothing') + ' for the KV cache.'; }
+    else { const toks = Math.floor(kv * 1e9 / 131072); v.className = 'verdict ok'; v.innerHTML = '<b>Fits.</b> About ' + fmt(kv, 1) + ' GB left for the KV cache, enough for roughly ' + fmt(Math.round(toks / 1000) * 1000) + ' tokens at 16-bit.'; }
+  }
+  renderM();
+})();
+</script>
+</body>
+</html>

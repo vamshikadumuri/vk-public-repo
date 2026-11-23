@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Making Every Token Cheaper</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+
+
+:root {
+  /* Layout: same system as Lesson 1. One reading column (max 680px); each step = numbered heading, prose, one framed figure, one key idea.
+     Colour carries meaning: violet = model weights, teal = KV cache (decode memory), grey = overhead, hatched = held back. Amber stays prefill. */
+  --paper: #F4F6F9;
+  --band: #E8ECF2;
+  --surface: #FFFFFF;
+  --ink: #172036;
+  --muted: #586178;
+  --rule: #DCE1EA;
+  --prefill: #C27C0E;
+  --decode: #0088A3;
+  --decode-tint: #DBEEF2;
+  --weights: #7B5BD6;
+  --weights-tint: #EAE4FA;
+  --over: #A3ABB9;
+  --off: #B9C0CC;
+  --tok-a: #E3E8F0;
+  --tok-b: #D3DBE7;
+  --bad: #B42318;
+  --bad-tint: #FCE9E7;
+  --good: #1F7A4A;
+  --good-tint: #E3F3EA;
+  --display: 'Bricolage Grotesque', 'Avenir Next', system-ui, sans-serif;
+  --body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+    --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+    --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+    --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0C121C; --band: #111A28; --surface: #121A27; --ink: #E7EBF3; --muted: #9AA3B6; --rule: #263043;
+  --prefill: #C0842A; --decode: #2A98B5; --decode-tint: #173646; --weights: #8B70D8; --weights-tint: #2A2546;
+  --over: #5B6476; --off: #3A4558; --tok-a: #1C2638; --tok-b: #26324A;
+  --bad: #F0705F; --bad-tint: #3A1F1E; --good: #4CB27A; --good-tint: #16301F;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition: none !important; animation: none !important; } }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--body); font-size: 17px; line-height: 1.6; -webkit-text-size-adjust: 100%; }
+a { color: var(--decode); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--decode); outline-offset: 2px; border-radius: 4px; }
+.progress { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 10; }
+.progress span { display: block; height: 100%; width: 0; background: var(--decode); }
+.wrap { max-width: 680px; margin: 0 auto; padding: 0 20px; }
+
+/* Hero */
+.hero { background: var(--band); padding: 40px 0 32px; border-bottom: 1px solid var(--rule); }
+.kicker { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; }
+.kicker a { color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 800; font-size: clamp(2.2rem, 9vw, 3.4rem); line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 14px; text-wrap: balance; }
+h1 .t { border-radius: 6px; padding: 0 0.06em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+h1 .t:nth-child(odd) { background: var(--tok-a); }
+h1 .t:nth-child(even) { background: var(--tok-b); }
+.lede { font-size: 1.08rem; margin: 0 0 22px; max-width: 34em; }
+
+.demo { background: var(--surface); border: 1.5px solid var(--ink); border-radius: 16px; padding: 18px 16px 16px; }
+.demo-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 10px; }
+
+/* Memory bar */
+.mem { display: flex; height: 44px; border-radius: 8px; overflow: hidden; border: 1px solid var(--rule); background: var(--surface); }
+.mem > div { position: relative; min-width: 0; display: flex; align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 600; white-space: nowrap; overflow: hidden; transition: flex-basis .3s ease; }
+.mem .w { background: var(--weights); color: #fff; }
+.mem .o { background: var(--over); }
+.mem .k { background: var(--decode-tint); color: var(--ink); justify-content: flex-start; }
+.mem .k .kfill { position: absolute; inset: 0 auto 0 0; width: 100%; background: var(--decode); transition: width .25s linear; }
+.mem .k span { position: relative; padding-left: 8px; color: #fff; text-shadow: 0 0 2px rgba(0,0,0,.25); }
+.mem .h { background: repeating-linear-gradient(135deg, var(--off) 0 3px, transparent 3px 7px); color: var(--muted); }
+.mem-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 8px; }
+.mem-legend b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+.sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+.sw.w { background: var(--weights); } .sw.o { background: var(--over); } .sw.k { background: var(--decode); }
+.sw.h { background: repeating-linear-gradient(135deg, var(--off) 0 2px, transparent 2px 4px); box-shadow: inset 0 0 0 1px var(--off); }
+.sw.kv { background: var(--decode); } .sw.vv { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+
+.users { display: grid; grid-template-columns: repeat(auto-fill, minmax(13px, 1fr)); gap: 4px; margin: 14px 0 6px; }
+.u { aspect-ratio: 1; border-radius: 50%; border: 1.5px solid var(--rule); background: transparent; transition: background-color .15s, border-color .15s; }
+.u.on { background: var(--decode); border-color: var(--decode); }
+.u.wait { border: 2px dashed var(--bad); }
+.demo-stats { display: flex; justify-content: space-between; gap: 8px; font-size: 0.82rem; color: var(--muted); }
+.demo-stats b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.demo-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-top: 12px; }
+.status { font-size: 0.92rem; min-height: 3em; margin: 0; flex: 1 1 260px; }
+@media (max-width: 480px) { .status { min-height: 4.6em; } }
+
+button, .seg button { font: inherit; font-size: 0.92rem; font-weight: 500; color: var(--ink); cursor: pointer; background: var(--surface); border: 1.5px solid var(--ink); border-radius: 999px; padding: 7px 16px; }
+button:hover { background: var(--band); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--ink); color: var(--paper); }
+button.primary:hover { opacity: .9; background: var(--ink); }
+
+.toc { padding: 26px 0 6px; }
+.toc h2 { font-family: var(--display); font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.toc ol { margin: 0; padding-left: 1.4em; columns: 2; column-gap: 28px; font-size: 0.95rem; }
+.toc li { break-inside: avoid; margin: 2px 0; }
+@media (max-width: 480px) { .toc ol { columns: 1; } }
+
+section.step { padding: 36px 0 8px; scroll-margin-top: 12px; }
+.step-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.step-head.plain { border-top: 2px solid var(--ink); padding-top: 14px; }
+.num { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--ink); display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 1.05rem; }
+h2 { font-family: var(--display); font-weight: 800; font-size: 1.6rem; line-height: 1.2; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h3 { font-family: var(--display); font-weight: 600; font-size: 1.1rem; margin: 22px 0 6px; }
+p { margin: 0 0 14px; }
+.key { border-left: 3px solid var(--ink); padding: 2px 0 2px 14px; margin: 18px 0 8px; font-weight: 500; }
+.key span { display: block; font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+figure { margin: 18px 0; }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 16px; }
+figcaption { font-size: 0.86rem; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+.fig-title { font-weight: 600; font-size: 0.95rem; margin: 0 0 12px; }
+.note { font-size: 0.8rem; color: var(--muted); }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--band); border-radius: 4px; padding: 0 4px; }
+
+.chip { font-family: var(--mono); font-size: 0.84rem; line-height: 1.5; white-space: pre; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink); display: inline-block; }
+.chip.d { background: var(--decode-tint); border-color: var(--decode); }
+
+
+/* Controls */
+.controls { display: grid; gap: 14px; margin-bottom: 16px; }
+.ctl label, .ctl .ctl-name { display: block; font-size: 0.84rem; color: var(--muted); margin-bottom: 5px; }
+.ctl output { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { padding: 5px 13px; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+input[type=range] { width: 100%; accent-color: var(--decode); height: 28px; margin: 0; }
+.readouts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 4px 0 14px; }
+.ro { background: var(--paper); border-radius: 10px; padding: 10px 10px 8px; }
+.ro b { display: block; font-family: var(--display); font-weight: 800; font-size: 1.4rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ro span { display: block; font-size: 0.76rem; color: var(--muted); line-height: 1.3; margin-top: 3px; }
+@media (max-width: 400px) { .ro b { font-size: 1.15rem; } }
+
+/* Sequence list */
+.seq { list-style: none; counter-reset: s; padding: 0; margin: 0 0 16px; display: grid; gap: 10px; }
+.seq li { counter-increment: s; display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
+.seq li::before { content: counter(s); display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--band); font-family: var(--display); font-weight: 800; font-size: 0.85rem; }
+
+/* Log card */
+.log { font-family: var(--mono); font-size: 0.78rem; line-height: 1.55; background: var(--band); border-radius: 10px; padding: 12px 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0 0; }
+.log .i { color: var(--muted); }
+.log .e { color: var(--bad); }
+.log b { font-weight: 500; color: var(--ink); }
+
+/* Quiz */
+.q { border-top: 1px solid var(--rule); padding: 14px 0 6px; }
+.q p { margin: 0 0 8px; font-weight: 500; }
+.q p .qn { font-family: var(--display); font-weight: 800; margin-right: 6px; }
+details summary { cursor: pointer; color: var(--decode); font-weight: 500; font-size: 0.92rem; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "+"; display: inline-block; width: 1em; font-weight: 600; }
+details[open] summary::before { content: "\2212"; }
+details .ans { margin: 8px 0 10px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; font-size: 0.95rem; }
+.recap ol { padding-left: 1.3em; margin: 0 0 14px; }
+.recap li { margin: 4px 0; }
+.next { background: var(--band); border-radius: 14px; padding: 18px; margin: 18px 0 8px; }
+.next b { font-family: var(--display); font-size: 1.15rem; display: block; margin-bottom: 4px; }
+.sources { font-size: 0.82rem; color: var(--muted); padding: 24px 0 48px; }
+.sources ul { padding-left: 1.1em; margin: 6px 0 0; }
+.sources a { color: var(--muted); }
+
+/* Lesson 4 */
+.words { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 14px 16px; margin: 6px 0 0; }
+.words h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 8px; }
+.words dl { margin: 0; display: grid; grid-template-columns: 124px 1fr; gap: 6px 12px; font-size: 0.92rem; }
+.words dt { font-weight: 600; }
+.words dd { margin: 0; }
+@media (max-width: 400px) { .words dl { grid-template-columns: 1fr; gap: 0; } .words dd { margin-bottom: 8px; } }
+
+.track { position: relative; height: 16px; border-radius: 4px; background-image: linear-gradient(to right, var(--rule) 1px, transparent 1px); background-size: 25% 100%; }
+.fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; min-width: 2px; transition: width .3s ease; background: var(--decode); }
+.fill.muted { background: var(--off); }
+.hbars .row { margin: 8px 0; }
+.hbars .lab { display: flex; justify-content: space-between; gap: 8px; font-size: 0.86rem; margin-bottom: 3px; }
+.hbars .lab b { font-variant-numeric: tabular-nums; }
+
+/* Hero request bars */
+.panels { display: grid; gap: 14px; }
+.panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 0.86rem; margin-bottom: 5px; }
+.panel-head b { font-weight: 600; }
+.panel-head span { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.panel-head span strong { color: var(--ink); }
+.reqs { display: grid; gap: 3px; }
+.rq { display: flex; height: 16px; border-radius: 4px; overflow: hidden; gap: 2px; transition: opacity .25s; }
+.rq.off { opacity: 0; }
+.rq .s, .rq .own { height: 100%; }
+.rq .s { flex: 2048; }
+.rq .own { flex: 256; background: var(--prefill); }
+.rq .s.calc { background: var(--prefill); }
+.rq .s.hit { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.leg { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 10px; }
+.sw.calc { background: var(--prefill); } .sw.hit { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); } .sw.dec { background: var(--decode); }
+
+/* Block matcher */
+.scen { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.scen button { font-size: 0.84rem; padding: 5px 12px; }
+.scen button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.mrow { margin-bottom: 12px; }
+.mrow .who { font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; }
+.mrow .who span { font-weight: 400; color: var(--muted); }
+.mblocks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.mb { border-radius: 8px; padding: 5px 6px 6px; border: 1.5px solid var(--rule); background: var(--surface); min-height: 74px; display: grid; grid-template-rows: auto 1fr auto; gap: 3px; }
+.mb .fp { font-family: var(--mono); font-size: 0.68rem; color: var(--muted); }
+.mb .toks { display: flex; flex-wrap: wrap; gap: 2px 4px; align-content: start; font-family: var(--mono); font-size: 0.74rem; line-height: 1.35; }
+.mb .toks i { font-style: normal; }
+.mb .toks i.diff { color: var(--bad); font-weight: 600; text-decoration: underline; }
+.mb .st { font-size: 0.7rem; font-weight: 600; }
+.mb.cached { border-color: var(--decode); }
+.mb.hit { background: var(--decode-tint); border-color: var(--decode); }
+.mb.hit .st { color: var(--ink); }
+.mb.miss { background: var(--surface); border-color: var(--prefill); box-shadow: inset 0 0 0 1px var(--prefill); }
+.mb.miss .st { color: var(--prefill); }
+.mresult { font-size: 0.92rem; background: var(--paper); border-radius: 10px; padding: 8px 12px; margin-top: 4px; }
+
+/* Order compare */
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 480px) { .two { grid-template-columns: 1fr; } }
+.tpl { border-radius: 12px; padding: 12px; background: var(--surface); border: 1px solid var(--rule); }
+.tpl h4 { margin: 0 0 8px; font-size: 0.9rem; }
+.tpl.bad { box-shadow: inset 3px 0 0 var(--bad); }
+.tpl.good { box-shadow: inset 3px 0 0 var(--good); }
+.tpl ol { margin: 0; padding-left: 1.2em; font-size: 0.88rem; }
+.tpl li { margin: 3px 0; }
+.tpl .var { color: var(--bad); font-weight: 600; }
+.tpl .fixed { color: var(--ink); }
+.tpl p { margin: 8px 0 0; font-size: 0.84rem; color: var(--muted); }
+
+/* Free list */
+.freeq { display: flex; flex-wrap: wrap; gap: 4px; align-items: stretch; }
+.fq { flex: 0 0 auto; min-width: 58px; border-radius: 8px; padding: 6px 8px; font-size: 0.74rem; background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); }
+.fq b { display: block; font-family: var(--mono); font-size: 0.78rem; }
+.fq.lru { box-shadow: inset 0 0 0 2px var(--bad); }
+.fq.hit { background: var(--decode); color: #fff; box-shadow: none; }
+.fq-ends { display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--muted); margin-top: 6px; }
+
+/* Timeline */
+.tl { display: flex; height: 30px; gap: 1px; border-radius: 6px; overflow: hidden; margin: 8px 0 4px; }
+.tl div { min-width: 1px; }
+.tl .dp { background: var(--decode); }
+.tl .mp { background: var(--prefill); }
+.tl-ends { display: flex; justify-content: space-between; font-size: 0.76rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.levers { list-style: none; margin: 0; padding: 0; }
+.levers li { padding: 12px 0 12px 12px; border-bottom: 1px solid var(--rule); box-shadow: inset 3px 0 0 var(--decode); }
+.levers li:last-child { border-bottom: 0; }
+.levers .flag { font-family: var(--mono); font-size: 0.86rem; font-weight: 500; display: block; margin-bottom: 2px; }
+.levers p { margin: 0; font-size: 0.95rem; }
+.levers .cost { display: block; font-size: 0.84rem; color: var(--muted); margin-top: 3px; }
+.callout { background: var(--band); border-radius: 14px; padding: 16px; margin: 18px 0; }
+.callout b.h { font-family: var(--display); font-size: 1.1rem; display: block; margin-bottom: 6px; }
+.callout ul { margin: 0; padding-left: 1.1em; }
+.callout li { margin: 5px 0; }
+.warnbox { border-radius: 12px; padding: 12px 14px; background: var(--bad-tint); box-shadow: inset 3px 0 0 var(--bad); margin: 14px 0; font-size: 0.95rem; }
+.formula { font-family: var(--display); font-weight: 600; font-size: 1.05rem; text-align: center; background: var(--surface); border: 1px dashed var(--muted); border-radius: 12px; padding: 14px 12px; margin: 16px 0; }
+.mresult { font-size: 0.92rem; background: var(--paper); border-radius: 10px; padding: 8px 12px; margin-top: 4px; }
+
+/* Lesson 5 */
+.rounds { display: grid; gap: 8px; }
+.round { display: grid; grid-template-columns: 56px 1fr; gap: 8px; align-items: start; transition: opacity .25s; }
+.round.off { opacity: 0; }
+.round .rl { font-size: 0.78rem; color: var(--muted); padding-top: 3px; }
+.round .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip.dr { border-style: dashed; border-color: var(--muted); }
+.chip.ok { background: var(--decode-tint); border-color: var(--decode); border-style: solid; }
+.chip.no { text-decoration: line-through; color: var(--bad); border-color: var(--bad); border-style: solid; background: var(--bad-tint); }
+.chip.big { border: 2px solid var(--ink); font-weight: 500; }
+.cmp2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.leg2 { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.8rem; color: var(--muted); margin-top: 10px; align-items: center; }
+.leg2 .chip { font-size: 0.72rem; padding: 0 5px; }
+
+.nl { position: relative; height: 54px; margin: 8px 0 2px; }
+.nl .axis { position: absolute; left: 0; right: 0; top: 26px; height: 2px; background: var(--rule); }
+.nl .lvl { position: absolute; top: 18px; width: 1.5px; height: 18px; background: var(--muted); transform: translateX(-50%); }
+.nl .lvl8 { position: absolute; top: 22px; width: 1px; height: 10px; background: var(--off); transform: translateX(-50%); }
+.nl .val { position: absolute; top: 8px; width: 3px; height: 38px; background: var(--ink); transform: translateX(-50%); border-radius: 2px; }
+.nl .q4 { position: absolute; top: 20px; width: 12px; height: 12px; border-radius: 50%; background: var(--prefill); transform: translate(-50%, 0); border: 2px solid var(--surface); }
+.nl-ends { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--muted); }
+
+table.fmt { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+.fmt th, .fmt td { text-align: left; padding: 8px 6px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.fmt th { font-weight: 600; font-size: 0.8rem; color: var(--muted); }
+.fmt td b { font-family: var(--mono); font-weight: 500; font-size: 0.82rem; }
+.tw { overflow-x: auto; }
+
+.kbars { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; align-items: end; height: 120px; margin-top: 8px; }
+.kbar { background: var(--decode-tint); box-shadow: inset 0 0 0 1px var(--decode); border-radius: 4px 4px 0 0; position: relative; min-height: 2px; transition: height .25s; }
+.kbar.sel { background: var(--decode); }
+.kbar span { position: absolute; top: -17px; left: 50%; transform: translateX(-50%); font-size: 0.68rem; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.kaxis { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; font-size: 0.72rem; color: var(--muted); text-align: center; margin-top: 3px; }
+</style>
+</head>
+<body>
+<div class="progress" aria-hidden="true"><span id="prog"></span></div>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="kicker"><span>Inference track, lesson 5 of 8</span><a href="https://claude.ai/artifact/8m8maPTnDHsbPQWnqjz1bA">Back to your prep plan</a></p>
+    <h1 aria-label="Making every token cheaper"><span class="t">Making</span><span class="t"> every</span><span class="t"> token</span><span class="t"> cheaper</span></h1>
+    <p class="lede">Two tricks. Quantization stores the model with smaller numbers, so there is less to read on every pass. Speculative decoding lets the big model accept several tokens in one pass.</p>
+
+    <div class="demo">
+      <p class="demo-title">Speculative decoding: a small model guesses 4 tokens, the big model checks them all in one pass</p>
+      <div class="rounds" id="rounds" role="img" aria-label="Five rounds of speculative decoding produce the 19-token reply in 5 big-model passes instead of 19"></div>
+      <div class="leg2"><span><span class="chip dr">guess</span> small model's guess</span><span><span class="chip ok">kept</span> big model agrees</span><span><span class="chip no">wrong</span> big model disagrees</span><span><span class="chip big">own</span> big model's own token</span></div>
+      <div class="cmp2">
+        <div class="ro"><b>19</b><span>big-model passes, normal decoding</span></div>
+        <div class="ro"><b id="specPasses">5</b><span>big-model passes, speculative</span></div>
+      </div>
+      <div class="demo-foot">
+        <p class="status" id="status" aria-live="polite"><b>Done.</b> Same reply as Lesson 1, in 5 big-model passes instead of 19. Each pass checks the guesses and always adds one token of its own.</p>
+        <button class="primary" id="replay" type="button">Play the rounds</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="words" aria-labelledby="wordsH">
+    <h2 id="wordsH">Words used in this lesson</h2>
+    <dl>
+      <dt>Quantization</dt><dd>Storing numbers with fewer bits, such as 8 or 4 instead of 16.</dd>
+      <dt>Weights</dt><dd>The model's fixed numbers, read on every pass.</dd>
+      <dt>Activations</dt><dd>The numbers that flow through the model while it runs.</dd>
+      <dt>W8A8, W4A16</dt><dd>Short names: W = bits for weights, A = bits for activations.</dd>
+      <dt>Draft model</dt><dd>A small, fast model that guesses the next few tokens.</dd>
+      <dt>Acceptance rate</dt><dd>How often the big model agrees with a guess.</dd>
+    </dl>
+  </section>
+
+  <nav class="toc" aria-label="Lesson steps">
+    <h2>In this lesson</h2>
+    <ol>
+      <li><a href="#bits">Fewer bits per number</a></li>
+      <li><a href="#formats">The common formats</a></li>
+      <li><a href="#which">Which format for which job</a></li>
+      <li><a href="#get">Getting a quantized model</a></li>
+      <li><a href="#spec">Speculative decoding</a></li>
+      <li><a href="#math">How much faster?</a></li>
+      <li><a href="#when">When it helps, and how to turn it on</a></li>
+      <li><a href="#quiz">Check yourself</a></li>
+    </ol>
+  </nav>
+
+  <section class="step" id="bits">
+    <div class="step-head"><span class="num">1</span><h2>Fewer bits per number</h2></div>
+    <p>Lesson 1 showed that each decode pass reads every weight from memory. Lesson 2 showed that weights take memory away from the KV cache. Both get better if each weight takes fewer bytes.</p>
+    <p>A 16-bit number can take 65,536 different values. An 8-bit number can take 256, and a 4-bit number only 16. To store a weight in fewer bits, we round it to the nearest value the smaller format can hold. That rounding is the only loss.</p>
+    <figure class="fig">
+      <p class="fig-title">Try it: round one weight</p>
+      <div class="controls"><div class="ctl"><label for="wIn">Weight value: <output id="wOut">0.37</output></label><input type="range" id="wIn" min="-1" max="1" step="0.01" value="0.37"></div></div>
+      <div class="nl" id="nl" role="img" aria-label="Number line from -1 to 1 showing 4-bit levels"></div>
+      <div class="nl-ends"><span>−1</span><span>0</span><span>+1</span></div>
+      <div class="readouts" style="margin-top:12px" aria-live="polite">
+        <div class="ro"><b id="r8">0.370</b><span>stored in 8 bits (256 levels)</span></div>
+        <div class="ro"><b id="r4">0.429</b><span>stored in 4 bits (16 levels)</span></div>
+        <div class="ro"><b id="e4">0.059</b><span>4-bit rounding error</span></div>
+      </div>
+      <figcaption>Tall ticks are the 16 values a 4-bit number can hold; the orange dot is where the weight lands. Real methods add a scale per group of weights. Smarter tools (GPTQ, AWQ) also choose the rounding to protect the weights that matter most.</figcaption>
+    </figure>
+    <p class="key"><span>Key idea</span>Quantization rounds each number to fewer levels. Fewer bits means less to read and more room for the KV cache.</p>
+  </section>
+
+  <section class="step" id="formats">
+    <div class="step-head"><span class="num">2</span><h2>The common formats</h2></div>
+    <p>Formats are named by what gets fewer bits. "W8A8" means 8-bit weights <em>and</em> 8-bit activations, so the math itself runs in 8 bits. "W4A16" means 4-bit weights but 16-bit math: weights are unpacked just before they are used.</p>
+    <div class="tw"><table class="fmt">
+      <thead><tr><th>Format</th><th>8B model size, roughly</th><th>Accuracy (Llama 3.1 study)</th><th>On an A100</th></tr></thead>
+      <tbody>
+        <tr><td><b>BF16</b> (W16A16)</td><td>16 GB</td><td>The baseline</td><td>Yes</td></tr>
+        <tr><td><b>FP8</b> W8A8</td><td>8 GB</td><td>Essentially lossless</td><td>Runs as 8-bit weights, 16-bit math</td></tr>
+        <tr><td><b>INT8</b> W8A8</td><td>8 GB</td><td>1% to 3% lower when tuned well</td><td>Yes, with 8-bit math</td></tr>
+        <tr><td><b>INT4</b> W4A16 (GPTQ, AWQ)</td><td>4 GB</td><td>Competitive, close to 8-bit</td><td>Yes</td></tr>
+      </tbody>
+    </table></div>
+    <p style="margin-top:14px">The accuracy column comes from a Red Hat study of over 500,000 evaluations on the Llama 3.1 family. One detail matters for your A100: it has no FP8 math units. vLLM still runs FP8 models on it, but as weight-only (W8A16). You get the memory and decode-speed savings, not faster math. FP8 math needs newer GPUs such as the H100.</p>
+    <p class="key"><span>Key idea</span>W = weight bits, A = activation bits. 8-bit is near lossless; 4-bit weights cost a little more accuracy for half the size again.</p>
+  </section>
+
+  <section class="step" id="which">
+    <div class="step-head"><span class="num">3</span><h2>Which format for which job</h2></div>
+    <p>Recall Lesson 1. With few requests, decode is limited by <em>reading</em> weights, so the smallest weights win. With a big batch, the GPU becomes limited by <em>math</em>, so faster 8-bit math wins.</p>
+    <p>The Red Hat study found the same. W4A16 was the most cost-efficient for one-request-at-a-time use. W8A8 did best for busy servers using continuous batching on high-end GPUs.</p>
+    <figure class="fig">
+      <p class="fig-title">Try it: what does each format buy you?</p>
+      <div class="controls">
+        <div class="ctl"><span class="ctl-name" id="qmLab">Model</span><div class="seg" id="qmSeg" role="group" aria-labelledby="qmLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="qfLab">Weight format</span><div class="seg" id="qfSeg" role="group" aria-labelledby="qfLab"></div></div>
+        <div class="ctl"><span class="ctl-name" id="qgLab">Memory vLLM may use</span><div class="seg" id="qgSeg" role="group" aria-labelledby="qgLab"></div></div>
+      </div>
+      <div class="readouts" aria-live="polite">
+        <div class="ro"><b id="qW">16.1 GB</b><span>weights</span></div>
+        <div class="ro"><b id="qKV">54 GB</b><span>left for the KV cache</span></div>
+        <div class="ro"><b id="qS">127</b><span>tokens/s ceiling, one request, A100 80GB</span></div>
+      </div>
+      <p class="mresult" id="qMsg" style="font-size:.9rem;background:var(--paper);border-radius:10px;padding:8px 12px;margin:0"></p>
+      <figcaption>Same math as Lessons 1 and 2: about 2 GB assumed for activations, and the speed ceiling = 2,039 GB/s ÷ weight size. Real files are a little bigger: scale factors are left out, and a few layers, such as the embeddings, usually stay 16-bit.</figcaption>
+    </figure>
+    <p class="key"><span>Key idea</span>Few users: smallest weights (W4A16). Busy server on new GPUs: 8-bit math (W8A8).</p>
+  </section>
+
+  <section class="step" id="get">
+    <div class="step-head"><span class="num">4</span><h2>Getting a quantized model</h2></div>
+    <ol class="seq">
+      <li><span><strong>Download one.</strong> Many models already have FP8, INT8 and INT4 versions on Hugging Face. vLLM reads the format from the model's config and loads it.</span></li>
+      <li><span><strong>Make one.</strong> The <code>llm-compressor</code> library writes quantized models for vLLM. Simple FP8 needs no sample data; INT8 and INT4 methods use a small set of sample prompts to choose the rounding.</span></li>
+      <li><span><strong>Quick test.</strong> <code>--quantization fp8</code> converts a 16-bit model to FP8 as it loads.</span></li>
+      <li><span><strong>Always measure.</strong> Run your own evals before and after. For your attacker model, compare attack success rates, not just general benchmarks.</span></li>
+    </ol>
+    <div class="callout">
+      <b class="h">Worked example: your attacker model</b>
+      <p>Lesson 2 assumed vLLM gets about 24 GB. In 16-bit, about 6 GB is left for the KV cache: roughly 45,000 tokens, so the default 131,072-token limit won't start.</p>
+      <p style="margin:0">With FP8 weights (8 GB) and an FP8 KV cache, about 14 GB is left, and each token takes half the space. That holds about 213,000 tokens, so even the default limit fits. Check attack quality first.</p>
+    </div>
+    <p class="key"><span>Key idea</span>Use a ready-made quantized model when one exists, and prove quality with your own evals.</p>
+  </section>
+
+  <section class="step" id="spec">
+    <div class="step-head"><span class="num">5</span><h2>Speculative decoding</h2></div>
+    <p>Lesson 1 said decode is limited by reading weights, and the math is tiny. So checking 5 tokens in one pass costs about the same as making 1. Speculative decoding uses this:</p>
+    <ol class="seq">
+      <li><span>A small, fast <strong>draft</strong> model guesses the next few tokens.</span></li>
+      <li><span>The big model reads all the guesses in <em>one</em> pass, the way prefill reads a prompt.</span></li>
+      <li><span>It keeps guesses from the start for as long as they match what it would have produced.</span></li>
+      <li><span>At the first wrong guess, it uses its own token instead. If all guesses pass, it adds one more of its own.</span></li>
+    </ol>
+    <p>The paper that introduced it proved that the output follows exactly the same probabilities as normal decoding. It showed a 2 to 3 times speedup on a large model, with identical outputs. You get speed without changing quality.</p>
+    <p class="key"><span>Key idea</span>The draft guesses, the big model checks many tokens in one pass. Every pass yields at least one token, often several.</p>
+  </section>
+
+  <section class="step" id="math">
+    <div class="step-head"><span class="num">6</span><h2>How much faster?</h2></div>
+    <p>It depends on two things: how often guesses are right (the acceptance rate), and how many tokens you guess each round. Guessing more helps only while guesses keep being right, and the draft model costs time too.</p>
+    <div class="formula" role="math" aria-label="Expected tokens per big-model pass equals 1 minus a to the power k plus 1, divided by 1 minus a">tokens per pass = (1 − a<sup>k+1</sup>) ÷ (1 − a)</div>
+    <p class="note" style="margin-top:-6px">a = acceptance rate, k = tokens guessed per round. From the speculative decoding paper.</p>
+    <figure class="fig">
+      <p class="fig-title">Try it</p>
+      <div class="controls">
+        <div class="ctl"><label for="aIn">Acceptance rate: <output id="aOut">0.80</output></label><input type="range" id="aIn" min="0.3" max="0.95" step="0.05" value="0.8"></div>
+        <div class="ctl"><label for="kIn">Tokens guessed per round: <output id="kOut">4</output></label><input type="range" id="kIn" min="1" max="8" step="1" value="4"></div>
+        <div class="ctl"><label for="cIn">Draft model's cost per guess, vs one big pass: <output id="cOut">10%</output></label><input type="range" id="cIn" min="0.02" max="0.4" step="0.02" value="0.1"></div>
+      </div>
+      <div class="readouts" aria-live="polite">
+        <div class="ro"><b id="sE">3.36</b><span>tokens per big pass</span></div>
+        <div class="ro"><b id="sS">2.4×</b><span>faster, after draft cost</span></div>
+        <div class="ro"><b id="sB">6</b><span>best number of guesses here</span></div>
+      </div>
+      <p class="fig-title" style="margin:14px 0 18px">Speed-up for each number of guesses</p>
+      <div class="kbars" id="kbars" role="img" aria-label="Speed-up for 1 to 8 guesses"></div>
+      <div class="kaxis" aria-hidden="true"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span></div>
+      <figcaption>Speed-up = tokens per pass ÷ (1 + guesses × draft cost), the paper's formula. Ideal case: one request, decode limited by memory.</figcaption>
+    </figure>
+    <p class="key"><span>Key idea</span>High acceptance and a cheap draft give big wins. Low acceptance can make it slower than normal.</p>
+  </section>
+
+  <section class="step" id="when">
+    <div class="step-head"><span class="num">7</span><h2>When it helps, and how to turn it on</h2></div>
+    <p>Speculative decoding spends spare math to save passes. With few requests the GPU has lots of spare math, so it helps most. With a big batch the GPU is already busy with math (Lesson 1), and the extra checking work competes with real work. The vLLM guide says it is for cutting inter-token latency at low to medium load.</p>
+    <p>vLLM supports several ways to make guesses:</p>
+    <ul class="levers">
+      <li><span class="flag">EAGLE, MTP</span><p>Small extra heads trained for one model, or built into it. Usually the biggest gains.</p><span class="cost">Needs a trained head for your exact model.</span></li>
+      <li><span class="flag">Draft model</span><p>A smaller model of the same family, such as a 1B model drafting for an 8B one.</p><span class="cost">Uses extra GPU memory for the second model.</span></li>
+      <li><span class="flag">N-gram</span><p>Guesses by copying text that already appears in the prompt. No extra model.</p><span class="cost">Small gains, but good when outputs repeat inputs, like rewriting or summarizing.</span></li>
+    </ul>
+    <p style="margin-top:14px">Turn it on with one flag. For example: <code>--speculative-config '{"method": "ngram", "num_speculative_tokens": 4}'</code>. Then benchmark at your real load (Lesson 8). The gain can disappear when the server is busy.</p>
+    <p class="key"><span>Key idea</span>Speculative decoding helps when the GPU has spare math: low load, latency-focused serving.</p>
+  </section>
+
+  <section class="step" id="quiz">
+    <div class="step-head plain"><h2>Check yourself</h2></div>
+    <p>Answer each one first, out loud or in chat, then open the answer.</p>
+    <div class="q"><p><span class="qn">1</span>Llama 3.1 8B in INT4 (W4A16): roughly how big are the weights, and what is the single-request decode ceiling on an A100 80GB SXM?</p>
+      <details><summary>Show answer</summary><div class="ans">8.03 billion × 0.5 bytes ≈ 4 GB. Ceiling ≈ 2,039 GB/s ÷ 4 GB ≈ 508 tokens per second, 4 times the 16-bit model's 127.</div></details></div>
+    <div class="q"><p><span class="qn">2</span>You load an FP8 model on your A100. What do you gain, and what don't you gain?</p>
+      <details><summary>Show answer</summary><div class="ans">You gain half-size weights: more KV cache room and faster decode at low load. You don't gain faster math, because the A100 has no FP8 math units. vLLM runs it as weight-only (W8A16).</div></details></div>
+    <div class="q"><p><span class="qn">3</span>A busy server runs batches of 256 on H100s. W4A16 or W8A8: which helps more?</p>
+      <details><summary>Show answer</summary><div class="ans">W8A8. At big batch sizes the GPU is limited by math, and W8A8 runs the math in 8 bits. W4A16 still does 16-bit math.</div></details></div>
+    <div class="q"><p><span class="qn">4</span>Acceptance rate 0.8, 4 guesses per round, draft cost 10% of a big pass. Tokens per big pass, and speed-up?</p>
+      <details><summary>Show answer</summary><div class="ans">(1 − 0.8⁵) ÷ (1 − 0.8) = 0.672 ÷ 0.2 = 3.36 tokens per pass. Speed-up = 3.36 ÷ (1 + 4 × 0.1) = 3.36 ÷ 1.4 = 2.4 times.</div></details></div>
+    <div class="q"><p><span class="qn">5</span>Does speculative decoding change what the model says?</p>
+      <details><summary>Show answer</summary><div class="ans">No. The method is designed so the output follows exactly the same probabilities as normal decoding. Only speed changes. Tiny floating-point differences are possible in practice.</div></details></div>
+  </section>
+
+  <section class="step recap" id="next">
+    <div class="step-head plain"><h2>What to remember</h2></div>
+    <ol>
+      <li>Quantization rounds numbers to fewer bits: less to read per pass, more room for the KV cache.</li>
+      <li>FP8 W8A8 is essentially lossless; INT8 W8A8 loses 1% to 3%; INT4 weights are close to 8-bit.</li>
+      <li>Your A100 runs FP8 as weight-only. FP8 math needs H100-class GPUs.</li>
+      <li>Speculative decoding: a draft guesses, the big model checks many tokens in one pass, with identical outputs.</li>
+      <li>It helps most at low load. Measure at your real load before keeping it.</li>
+    </ol>
+    <div class="next"><b>Next: Lesson 6, more than one GPU</b>Splitting a model across GPUs when it doesn't fit. And sharing one GPU with MIG or time-slicing, like your 0.3 share. <a href="https://claude.ai/artifact/NzSi3BVZim2ETkfvjtpwPf">Open Lesson 6</a></div>
+    <p style="margin-top:14px"><a href="https://claude.ai/artifact/4X7ppjDXD2CJ28WjeJq8MS">Back to Lesson 4</a></p>
+  </section>
+
+  <footer class="sources">
+    Sources
+    <ul>
+      <li><a href="https://arxiv.org/abs/2211.17192">Leviathan et al., Fast Inference from Transformers via Speculative Decoding (ICML 2023)</a>: identical outputs, 2 to 3 times faster, tokens-per-pass and speed-up formulas</li>
+      <li><a href="https://docs.vllm.ai/en/stable/features/speculative_decoding/">vLLM docs: speculative decoding</a>: methods, low-to-medium load guidance, <code>--speculative-config</code></li>
+      <li><a href="https://arxiv.org/abs/2411.02355">Kurtic et al., "Give Me BF16 or Give Me Death"? (ACL 2025)</a>: 500,000+ evaluations, FP8 lossless, INT8 1% to 3%, INT4 competitive, which format for which deployment</li>
+      <li><a href="https://docs.vllm.ai/en/v0.11.0/features/quantization/fp8.html">vLLM docs: FP8</a>: FP8 math needs compute capability 8.9+; Ampere runs FP8 as W8A16 with Marlin; on-the-fly FP8</li>
+      <li><a href="https://github.com/vllm-project/vllm/pull/5975">vLLM pull request 5975</a>: FP8 Marlin for Ampere GPUs</li>
+    </ul>
+  </footer>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n, d = 0) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+(function () { const prog = $('#prog'); if (!prog) return; const onScroll = () => { const h = document.documentElement; const max = h.scrollHeight - h.clientHeight; prog.style.width = (max > 0 ? h.scrollTop / max * 100 : 0) + '%'; }; window.addEventListener('scroll', onScroll, { passive: true }); onScroll(); })();
+function seg(host, items, obj, key, cb, label) {
+  const btns = items.map((it, i) => {
+    const b = el('button', null, label ? label(it) : it.name); b.type = 'button';
+    b.setAttribute('aria-pressed', String(i === obj[key]));
+    b.addEventListener('click', () => { obj[key] = i; sync(); cb(); });
+    host.appendChild(b); return b;
+  });
+  function sync() { btns.forEach((x, j) => x.setAttribute('aria-pressed', String(j === obj[key]))); }
+  return sync;
+}
+function bars(host, rows, scale) {
+  host.innerHTML = '';
+  rows.forEach((r) => {
+    const row = el('div', 'row');
+    const lab = el('div', 'lab'); lab.appendChild(el('span', null, r.name)); lab.appendChild(el('b', null, r.text));
+    const tr = el('div', 'track'); const f = el('div', 'fill' + (r.cls ? ' ' + r.cls : '')); f.style.width = (Math.min(1, r.v / scale) * 100) + '%';
+    tr.appendChild(f); row.appendChild(lab); row.appendChild(tr); host.appendChild(row);
+  });
+}
+
+(function () {
+  /* Hero: speculative rounds */
+  const R = [
+    { g: ['I', ' can', "'t", ' share'], ok: 4, own: ' my' },
+    { g: [' system', ' prompt', ',', ' and'], ok: 3, own: ' but' },
+    { g: [' I', "'m", ' glad', ' to'], ok: 2, own: ' happy' },
+    { g: [' to', ' help', ' with', ' anything'], ok: 3, own: ' something' },
+    { g: [' else', '.', ' Let', ' me'], ok: 2, own: '<|eot_id|>' }
+  ];
+  const host = $('#rounds');
+  const rows = R.map((r, i) => {
+    const row = el('div', 'round'); row.appendChild(el('span', 'rl', 'Pass ' + (i + 1)));
+    const c = el('div', 'chips');
+    r.g.forEach((t, j) => c.appendChild(el('span', 'chip ' + (j < r.ok ? 'ok' : j === r.ok ? 'no' : 'dr'), t)));
+    c.appendChild(el('span', 'chip big', r.own));
+    row.appendChild(c); host.appendChild(row); return { row, chips: c };
+  });
+  let total = 0; R.forEach((r) => (total += r.ok + 1));
+  let timers = [];
+  const btn = $('#replay'), statusEl = $('#status');
+  function setRound(i, stage) {
+    const cs = rows[i].chips.children, r = R[i];
+    for (let j = 0; j < r.g.length; j++) cs[j].className = 'chip ' + (stage === 0 ? 'dr' : j < r.ok ? 'ok' : j === r.ok ? 'no' : 'dr');
+    cs[r.g.length].style.visibility = stage === 0 ? 'hidden' : 'visible';
+  }
+  btn.addEventListener('click', () => {
+    timers.forEach(clearTimeout); timers = []; btn.disabled = true;
+    rows.forEach((r) => r.row.classList.add('off'));
+    $('#specPasses').textContent = '0';
+    let made = 0;
+    R.forEach((r, i) => {
+      const t0 = 400 + i * 2000;
+      timers.push(setTimeout(() => { rows[i].row.classList.remove('off'); setRound(i, 0); statusEl.innerHTML = '<b>Pass ' + (i + 1) + ', guessing.</b> The small model drafts 4 tokens quickly.'; }, t0));
+      timers.push(setTimeout(() => {
+        setRound(i, 1); made += r.ok + 1; $('#specPasses').textContent = i + 1;
+        statusEl.innerHTML = '<b>Pass ' + (i + 1) + ', checking.</b> The big model keeps ' + r.ok + ' guess' + (r.ok === 1 ? '' : 'es') + (r.ok < 4 ? ', rejects the next one,' : ',') + ' and adds its own token: ' + (r.ok + 1) + ' tokens from one pass. ' + made + ' of ' + total + ' done.';
+        if (i === R.length - 1) timers.push(setTimeout(() => { statusEl.innerHTML = '<b>Done.</b> Same reply as Lesson 1, in 5 big-model passes instead of 19. Each pass checks the guesses and always adds one token of its own.'; btn.disabled = false; }, 1800));
+      }, t0 + 1000));
+    });
+  });
+
+  /* Step 1 rounding */
+  const nl = $('#nl'), wIn = $('#wIn');
+  nl.appendChild(el('div', 'axis'));
+  const pos = (x) => ((x + 1) / 2 * 100) + '%';
+  for (let k = -127; k <= 127; k += 4) { const t = el('div', 'lvl8'); t.style.left = pos(k / 127); nl.appendChild(t); }
+  for (let k = -7; k <= 7; k++) { const t = el('div', 'lvl'); t.style.left = pos(k / 7); nl.appendChild(t); }
+  const v = el('div', 'val'); nl.appendChild(v);
+  const q = el('div', 'q4'); nl.appendChild(q);
+  function renderRound() {
+    const x = +wIn.value;
+    const q8 = Math.round(x * 127) / 127, q4 = Math.max(-7, Math.min(7, Math.round(x * 7))) / 7;
+    $('#wOut').textContent = x.toFixed(2);
+    $('#r8').textContent = q8.toFixed(3); $('#r4').textContent = q4.toFixed(3); $('#e4').textContent = Math.abs(x - q4).toFixed(3);
+    v.style.left = pos(x); q.style.left = pos(q4);
+  }
+  wIn.addEventListener('input', renderRound); renderRound();
+
+  /* Step 3 formats */
+  const QM = [{ name: 'Llama 3.1 8B', p: 8.03e9 }, { name: 'Llama 3.1 70B', p: 70.6e9 }];
+  const QF = [{ name: 'BF16', b: 2 }, { name: 'FP8 / INT8', b: 1 }, { name: 'INT4', b: 0.5 }];
+  const QG = [{ name: '24 GB (your share, assumed)', v: 24 }, { name: '72 GB (A100 80GB × 0.9)', v: 72 }];
+  const qs = { m: 0, f: 0, g: 1 };
+  seg($('#qmSeg'), QM, qs, 'm', renderQ); seg($('#qfSeg'), QF, qs, 'f', renderQ); seg($('#qgSeg'), QG, qs, 'g', renderQ);
+  function renderQ() {
+    const w = QM[qs.m].p * QF[qs.f].b / 1e9, budget = QG[qs.g].v, kv = budget - w - 2;
+    $('#qW').textContent = fmt(w, w < 100 ? 1 : 0) + ' GB';
+    $('#qKV').textContent = kv > 0 ? fmt(kv, kv < 10 ? 1 : 0) + ' GB' : 'none';
+    $('#qS').textContent = fmt(2039 / w);
+    let m;
+    if (kv <= 0) m = '<b>Doesn’t fit.</b> The weights and overhead need more than ' + budget + ' GB. Use fewer bits or more GPUs (Lesson 6).';
+    else {
+      const kvt = QM[qs.m].p > 3e10 ? 327680 : 131072;
+      const toks = Math.floor(kv * 1e9 / kvt);
+      m = '<b>Fits.</b> The KV cache could hold about ' + fmt(toks) + ' tokens in 16-bit, or twice that with an FP8 KV cache.';
+    }
+    $('#qMsg').innerHTML = m;
+  }
+  renderQ();
+
+  /* Step 6 speculative math */
+  const aIn = $('#aIn'), kIn = $('#kIn'), cIn = $('#cIn');
+  const E = (a, k) => (1 - Math.pow(a, k + 1)) / (1 - a);
+  const S = (a, k, c) => E(a, k) / (k * c + 1);
+  const kb = $('#kbars'); const kbs = [];
+  for (let k = 1; k <= 8; k++) { const b = el('div', 'kbar'); b.appendChild(el('span')); kb.appendChild(b); kbs.push(b); }
+  function renderSpec() {
+    const a = +aIn.value, k = +kIn.value, c = +cIn.value;
+    $('#aOut').textContent = a.toFixed(2); $('#kOut').textContent = k; $('#cOut').textContent = Math.round(c * 100) + '%';
+    $('#sE').textContent = fmt(E(a, k), 2); $('#sS').textContent = fmt(S(a, k, c), 1) + '×';
+    let best = 1; for (let j = 1; j <= 8; j++) if (S(a, j, c) > S(a, best, c)) best = j;
+    $('#sB').textContent = best;
+    const vals = kbs.map((_, i) => S(a, i + 1, c)); const mx = Math.max(...vals, 1);
+    kbs.forEach((b, i) => { b.style.height = (vals[i] / mx * 100) + '%'; b.className = 'kbar' + (i + 1 === k ? ' sel' : ''); b.firstChild.textContent = fmt(vals[i], 1) + '×'; });
+  }
+  [aIn, kIn, cIn].forEach((i) => i.addEventListener('input', renderSpec)); renderSpec();
+})();
+</script>
+</body>
+</html>
